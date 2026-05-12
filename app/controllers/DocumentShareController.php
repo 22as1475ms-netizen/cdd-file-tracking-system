@@ -3,6 +3,9 @@
 function share_doc(): void {
   global $pdo;
   csrf_verify();
+  // Only admins may initiate routing/share actions
+  require_once __DIR__ . "/../middleware/require_role.php";
+  require_role('ADMIN');
 
   $uid = (int)$_SESSION['user']['id'];
   $docId = req_int('document_id', 0);
@@ -16,7 +19,7 @@ function share_doc(): void {
   }
 
   try {
-    DocumentShareService::shareDocument($pdo, $doc, $uid, $target, req_str('permission', 'viewer'));
+    DocumentShareService::shareDocument($pdo, $doc, $uid, $target, 'editor');
   } catch (RuntimeException $e) {
     $error = $e->getMessage();
     if ($error === 'forbidden') {
@@ -27,34 +30,38 @@ function share_doc(): void {
     redirect('/documents/view?id='.$docId . $separator . 'err=' . urlencode($error) . '&user_id='.(int)$doc['owner_id']);
   }
 
-  redirect('/documents?tab=shared&msg=shared&user_id='.(int)$doc['owner_id']);
+  redirect('/documents/view?id=' . $docId . '&msg=shared&user_id=' . (int)$doc['owner_id']);
 }
 
 function share_folder(): void {
   global $pdo;
   csrf_verify();
+  // Only admins may initiate routing/share actions
+  require_once __DIR__ . "/../middleware/require_role.php";
+  require_role('ADMIN');
 
   $uid = (int)($_SESSION['user']['id'] ?? 0);
   $folderId = req_int('folder_id', 0);
   $ownerId = selected_owner_id($pdo, $uid);
   $folder = Folder::getForUser($pdo, $folderId, $ownerId, 'OFFICIAL');
   if (!$folder) {
-    redirect('/documents?tab=routed&err=folder_not_found' . documents_context_query_suffix(null, $ownerId));
+    redirect('/admin/dashboard');
   }
 
   $targetUserId = req_int('target_user_id', 0);
   $target = $targetUserId > 0 ? User::findById($pdo, $targetUserId) : null;
-  if (!$target || !in_array(strtoupper((string)($target['role'] ?? '')), ['EMPLOYEE', 'DIVISION_CHIEF'], true)) {
-    redirect('/documents?tab=routed&folder=' . $folderId . '&err=user_not_found' . documents_context_query_suffix($folderId, $ownerId));
+  // Allow sharing to ADMIN as well as employees and division chiefs
+  if (!$target || !in_array(strtoupper((string)($target['role'] ?? '')), ['EMPLOYEE', 'DIVISION_CHIEF', 'ADMIN'], true)) {
+    redirect('/admin/dashboard');
   }
   if ((int)$target['id'] === $uid) {
-    redirect('/documents?tab=routed&folder=' . $folderId . '&err=cannot_share_self' . documents_context_query_suffix($folderId, $ownerId));
+    redirect('/admin/dashboard');
   }
 
   $owner = User::findById($pdo, $ownerId);
   $divisionId = (int)($owner['division_id'] ?? 0);
   if ($divisionId > 0 && (int)($target['division_id'] ?? 0) !== $divisionId) {
-    redirect('/documents?tab=routed&folder=' . $folderId . '&err=user_not_found' . documents_context_query_suffix($folderId, $ownerId));
+    redirect('/admin/dashboard');
   }
 
   $tree = Folder::listTreeForUser($pdo, $ownerId, (string)$folder['name'], 'OFFICIAL');
@@ -67,7 +74,7 @@ function share_folder(): void {
     return in_array((int)($doc['folder_id'] ?? 0), $folderIds, true);
   }));
   if (empty($docs)) {
-    redirect('/documents?tab=routed&folder=' . $folderId . '&err=not_found' . documents_context_query_suffix($folderId, $ownerId));
+    redirect('/admin/dashboard');
   }
 
   foreach ($docs as $doc) {
@@ -76,36 +83,50 @@ function share_folder(): void {
       die("403 owner only");
     }
     if (in_array(strtoupper((string)($doc['routing_status'] ?? 'AVAILABLE')), ['PENDING_SHARE_ACCEPTANCE', 'SHARE_ACCEPTED', 'PENDING_REVIEW_ACCEPTANCE', 'IN_REVIEW'], true)) {
-      redirect('/documents?tab=routed&folder=' . $folderId . '&err=share_in_progress' . documents_context_query_suffix($folderId, $ownerId));
+      redirect('/admin/dashboard');
     }
   }
 
-  $perm = req_str('permission', 'viewer');
-  if (!in_array($perm, ['viewer', 'editor'], true)) $perm = 'viewer';
+  $perm = 'editor';
   $division = (int)($target['division_id'] ?? 0) > 0 ? Division::find($pdo, (int)$target['division_id']) : null;
 
   foreach ($docs as $doc) {
     $docId = (int)($doc['id'] ?? 0);
-    foreach (Permission::listForDoc($pdo, $docId) as $member) {
-      Permission::revoke($pdo, $docId, (int)($member['user_id'] ?? 0));
-    }
+    // Add share permission for the target without removing other recipients.
     Permission::upsert($pdo, $docId, (int)$target['id'], $perm, $uid);
-    Document::updateTrackingState($pdo, $docId, 'Awaiting recipient acceptance', 'PENDING_SHARE_ACCEPTANCE');
-    Document::markRouteActive($pdo, $docId);
-    DocumentRoute::add(
-      $pdo,
-      $docId,
-      (string)($doc['current_location'] ?? ''),
-      'Awaiting recipient acceptance',
-      'PENDING_SHARE_ACCEPTANCE',
-      document_share_route_note($target, $division) . ' Folder: ' . Folder::basename((string)$folder['name']),
-      $uid
-    );
+    // If target is admin, auto-accept so admins see shared files immediately
+    if (strtoupper((string)($target['role'] ?? '')) === 'ADMIN') {
+      Permission::accept($pdo, $docId, (int)$target['id']);
+      $recipientName = trim((string)($target['name'] ?? 'Admin'));
+      Document::updateTrackingState($pdo, $docId, 'Shared with ' . $recipientName, 'SHARE_ACCEPTED');
+      Document::markRouteActive($pdo, $docId);
+      DocumentRoute::add(
+        $pdo,
+        $docId,
+        (string)($doc['current_location'] ?? ''),
+        'Shared with ' . $recipientName,
+        'SHARE_ACCEPTED',
+        'Shared with admin: ' . $recipientName . ' (folder)',
+        $uid
+      );
+    } else {
+      Document::updateTrackingState($pdo, $docId, 'Awaiting recipient acceptance', 'PENDING_SHARE_ACCEPTANCE');
+      Document::markRouteActive($pdo, $docId);
+      DocumentRoute::add(
+        $pdo,
+        $docId,
+        (string)($doc['current_location'] ?? ''),
+        'Awaiting recipient acceptance',
+        'PENDING_SHARE_ACCEPTANCE',
+        document_share_route_note($target, $division) . ' Folder: ' . Folder::basename((string)$folder['name']),
+        $uid
+      );
+    }
   }
 
   Notification::add($pdo, (int)$target['id'], "A routed folder was shared with you", Folder::basename((string)$folder['name']), "/documents?tab=shared");
   AuditLog::add($pdo, $uid, "Shared folder", null, "folder_id=" . $folderId . ", to=" . (string)($target['email'] ?? '') . ", docs=" . count($docs));
-  redirect('/documents?tab=shared&msg=shared&user_id=' . $ownerId);
+  redirect('/admin/dashboard?msg=shared');
 }
 
 function respond_to_share(): void {
@@ -137,7 +158,7 @@ function respond_to_share(): void {
   if (($result['status'] ?? '') === 'accepted') {
     redirect('/documents/view?id='.$docId.'&msg=share_accepted');
   }
-  redirect('/documents?tab=shared&msg=share_declined');
+  redirect('/admin/dashboard?msg=share_declined');
 }
 
 function revoke_share(): void {
@@ -152,7 +173,7 @@ function revoke_share(): void {
   try {
     DocumentShareService::revokeShare($pdo, $doc, $uid, (string)($_SESSION['user']['name'] ?? ($doc['owner_name'] ?? 'Owner')));
   } catch (RuntimeException $e) {
-    redirect('/documents?tab=shared&err=' . urlencode($e->getMessage()) . '&user_id='.(int)$doc['owner_id']);
+    redirect('/admin/dashboard');
   }
-  redirect('/documents?tab=shared&msg=share_cancelled&user_id='.(int)$doc['owner_id']);
+  redirect('/admin/dashboard?msg=share_cancelled');
 }

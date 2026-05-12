@@ -32,24 +32,52 @@ class DocumentShareService {
 
     $permission = self::normalizePermission($permission);
     $targetId = (int)($target['id'] ?? 0);
+    $role = strtoupper((string)($target['role'] ?? ''));
     $division = (int)($target['division_id'] ?? 0) > 0 ? Division::find($pdo, (int)$target['division_id']) : null;
 
-    foreach (Permission::listForDoc($pdo, $docId) as $member) {
-      Permission::revoke($pdo, $docId, (int)($member['user_id'] ?? 0));
-    }
-
+    // Do not revoke existing permissions — allow multiple recipients to hold shared access.
     Permission::upsert($pdo, $docId, $targetId, $permission, $actorId);
-    Document::updateTrackingState($pdo, $docId, 'Awaiting recipient acceptance', 'PENDING_SHARE_ACCEPTANCE');
-    Document::markRouteActive($pdo, $docId);
-    DocumentRoute::add(
-      $pdo,
-      $docId,
-      (string)($doc['current_location'] ?? ''),
-      'Awaiting recipient acceptance',
-      'PENDING_SHARE_ACCEPTANCE',
-      self::shareRouteNote($target, $division, (string)($options['note_suffix'] ?? '')),
-      $actorId
-    );
+    // If the share target is an admin, auto-accept the share so admin sees the file immediately.
+    if ($role === 'ADMIN') {
+      Permission::accept($pdo, $docId, $targetId);
+      $recipientName = trim((string)($target['name'] ?? 'Admin'));
+      Document::updateTrackingState($pdo, $docId, 'Shared with ' . $recipientName, 'SHARE_ACCEPTED');
+      Document::markRouteActive($pdo, $docId);
+      DocumentRoute::add(
+        $pdo,
+        $docId,
+        (string)($doc['current_location'] ?? ''),
+        'Shared with ' . $recipientName,
+        'SHARE_ACCEPTED',
+        'Shared with admin: ' . $recipientName,
+        $actorId
+      );
+      if (($options['notify'] ?? true) !== false) {
+        // Notify the owner that the share was accepted by admin
+        $notifyUserId = (int)($doc['owner_id'] ?? 0);
+        if ($notifyUserId > 0) {
+          Notification::add(
+            $pdo,
+            $notifyUserId,
+            'Shared document accepted',
+            'The document was shared with an administrator and is now visible to them.',
+            '/documents/view?id=' . $docId
+          );
+        }
+      }
+    } else {
+      Document::updateTrackingState($pdo, $docId, 'Awaiting recipient acceptance', 'PENDING_SHARE_ACCEPTANCE');
+      Document::markRouteActive($pdo, $docId);
+      DocumentRoute::add(
+        $pdo,
+        $docId,
+        (string)($doc['current_location'] ?? ''),
+        'Awaiting recipient acceptance',
+        'PENDING_SHARE_ACCEPTANCE',
+        self::shareRouteNote($target, $division, (string)($options['note_suffix'] ?? '')),
+        $actorId
+      );
+    }
 
     if (($options['audit'] ?? true) !== false) {
       AuditLog::add(
@@ -57,16 +85,16 @@ class DocumentShareService {
         $actorId,
         (string)($options['audit_action'] ?? 'Shared document'),
         $docId,
-        'to=' . trim((string)($target['email'] ?? '')) . ', perm=' . $permission
+        'to=' . trim((string)($target['email'] ?? ''))
       );
     }
 
-    if (($options['notify'] ?? true) !== false) {
+    if (($options['notify'] ?? true) !== false && $role !== 'ADMIN') {
       Notification::add(
         $pdo,
         $targetId,
         (string)($options['notification_title'] ?? 'A routed file was shared with you'),
-        (string)($options['notification_body'] ?? ('Permission: ' . $permission)),
+        (string)($options['notification_body'] ?? 'Open the routed file to accept it.'),
         (string)($options['notification_link'] ?? ('/documents/view?id=' . $docId))
       );
     }
@@ -153,7 +181,7 @@ class DocumentShareService {
   }
 
   private static function normalizePermission(string $permission): string {
-    return in_array($permission, ['viewer', 'editor'], true) ? $permission : 'viewer';
+    return 'editor';
   }
 
   private static function canForwardDocument(PDO $pdo, int $docId, int $actorId): bool {
@@ -179,7 +207,7 @@ class DocumentShareService {
 
   private static function assertValidTarget(array $doc, int $actorId, array $target): void {
     $role = strtoupper((string)($target['role'] ?? ''));
-    if (!in_array($role, ['EMPLOYEE', 'DIVISION_CHIEF'], true)) {
+    if (!in_array($role, ['EMPLOYEE', 'DIVISION_CHIEF', 'ADMIN'], true)) {
       throw new RuntimeException('user_not_found');
     }
 

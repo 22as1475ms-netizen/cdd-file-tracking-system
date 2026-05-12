@@ -12,6 +12,7 @@ require_once __DIR__ . "/../models/User.php";
 require_once __DIR__ . "/../models/AuditLog.php";
 require_once __DIR__ . "/../models/Notification.php";
 require_once __DIR__ . "/../models/DocumentMessage.php";
+require_once __DIR__ . "/../models/Organization.php";
 require_once __DIR__ . "/../services/DocumentService.php";
 require_once __DIR__ . "/../services/DocumentShareService.php";
 require_once __DIR__ . "/../services/AccessService.php";
@@ -52,7 +53,7 @@ function document_tracking_payload(array $input, string $filename, string $stora
     'document_type' => 'INCOMING',
     'signatory' => $rawSignatory !== '' ? mb_substr($rawSignatory, 0, 150) : '',
     'current_location' => mb_substr($rawLocation !== '' ? $rawLocation : document_tracking_location_default($storageArea), 0, 180),
-    'routing_status' => Document::normalizeRoutingStatus((string)($input['routing_status'] ?? 'AVAILABLE')),
+    'routing_status' => 'NOT_ROUTED',
     'priority_level' => Document::normalizePriorityLevel((string)($input['priority_level'] ?? 'NORMAL')),
     'document_date' => preg_match('/^\d{4}-\d{2}-\d{2}$/', $rawDate)
       ? $rawDate
@@ -107,6 +108,7 @@ function document_route_note(string $action, array $tracking, string $filename =
   $label = $title !== '' ? $title : $filename;
   return match ($action) {
     'upload' => 'Document logged during upload: ' . $label,
+    'create' => 'Blank document created: ' . $label,
     'submit' => 'Document submitted for section chief review.',
     'approve' => 'Document review approved.',
     'reject' => 'Document review rejected.',
@@ -150,7 +152,11 @@ function is_admin_user(): bool {
 }
 
 function is_division_chief_user(): bool {
-  return current_role() === 'DIVISION_CHIEF';
+  if (current_role() === 'DIVISION_CHIEF') {
+    return true;
+  }
+  $uid = (int)($_SESSION['user']['id'] ?? 0);
+  return $uid > 0 && !empty(TeamMember::chiefSectionIds($GLOBALS['pdo'], $uid));
 }
 
 function selected_owner_id(PDO $pdo, int $sessionUserId): int {
@@ -230,6 +236,24 @@ function can_mutate_document(array $doc, int $uid): bool {
   return !is_approval_locked($doc);
 }
 
+function document_admin_reauth_ok(PDO $pdo, string $password): bool {
+  if ($password === '' || !is_admin_user()) {
+    return false;
+  }
+
+  $adminId = (int)($_SESSION['user']['id'] ?? 0);
+  if ($adminId <= 0) {
+    return false;
+  }
+
+  $admin = User::findById($pdo, $adminId);
+  if (!$admin) {
+    return false;
+  }
+
+  return password_verify($password, (string)($admin['password'] ?? ''));
+}
+
 function can_submit_document_for_review(array $doc): bool {
   $status = strtolower(trim((string)($doc['status'] ?? 'Draft')));
   if (in_array($status, ['approved', 'to be reviewed'], true)) {
@@ -241,6 +265,9 @@ function can_submit_document_for_review(array $doc): bool {
 
 function can_review_document(array $doc, int $uid): bool {
   if (is_admin_user()) {
+    return true;
+  }
+  if ((int)($doc['assigned_reviewer_id'] ?? 0) === $uid) {
     return true;
   }
   $level = AccessService::level($GLOBALS['pdo'], (int)($doc['id'] ?? 0), $uid);
@@ -366,6 +393,28 @@ function purge_trash_items(PDO $pdo, int $ownerId, array $folderIds, array $docu
   }
 
   return $deletedCount;
+}
+
+function purge_permanent_items(PDO $pdo, int $ownerId, array $folderIds, array $documentIds): int {
+  $folderIds = array_values(array_unique(array_map('intval', $folderIds)));
+  $documentIds = array_values(array_unique(array_map('intval', $documentIds)));
+
+  $eligibleDocumentIds = [];
+  foreach ($documentIds as $docId) {
+    $doc = Document::get($pdo, $docId);
+    if (!$doc || (int)($doc['owner_id'] ?? 0) !== $ownerId) {
+      continue;
+    }
+    if ((string)($doc['deleted_at'] ?? '') !== '' || document_is_finalized($doc)) {
+      $eligibleDocumentIds[] = $docId;
+    }
+  }
+
+  if (empty($folderIds) && empty($eligibleDocumentIds)) {
+    return 0;
+  }
+
+  return purge_trash_items($pdo, $ownerId, $folderIds, $eligibleDocumentIds);
 }
 
 function storage_area_tab(string $storageArea): string {
@@ -675,217 +724,18 @@ function workspace_global_search(PDO $pdo, int $uid, int $targetUserId, string $
 
   return $results;
 }
-function documents(): void {
-  global $pdo;
-  $uid = (int)$_SESSION['user']['id'];
-
-  $tab = req_str('tab', 'routed');
-  if (in_array($tab, ['private', 'official', 'my'], true)) {
-    $tab = 'routed';
-  }
-  $search = req_str('search', '');
-  $workspaceQuery = req_str('q', '');
-  $folder = req_int('folder', 0);
-  $page = max(1, req_int('page', 1));
-  $per = 10;
-  $isAdmin = is_admin_user();
-  $isDivisionChief = is_division_chief_user();
-  $targetUserId = selected_owner_id($pdo, $uid);
-  $selectedUser = User::findById($pdo, $targetUserId);
-  $storageArea = 'OFFICIAL';
-
-  $statusFilter = req_str('status', '');
-  $categoryFilter = req_str('category', '');
-  $tagsFilter = req_str('tags', '');
-  $dateFrom = req_str('date_from', '');
-  $dateTo = req_str('date_to', '');
-  $documentCodeFilter = req_str('document_code', '');
-  $documentTypeFilter = req_str('document_type', '');
-  $routingStatusFilter = req_str('routing_status', '');
-  $routeStateFilter = strtoupper(req_str('route_state', ''));
-  $priorityLevelFilter = req_str('priority_level', '');
-  $currentLocationFilter = req_str('current_location', '');
-  $employeeFilter = req_int('employee_id', 0);
-  $sort = workspace_sort(req_str('sort', 'modified_desc'));
-  $filters = [
-    'status' => $statusFilter,
-    'category' => $categoryFilter,
-    'tags' => $tagsFilter,
-    'date_from' => $dateFrom,
-    'date_to' => $dateTo,
-    'document_code' => $documentCodeFilter,
-    'document_type' => $documentTypeFilter,
-    'routing_status' => $routingStatusFilter,
-    'route_state' => in_array($routeStateFilter, ['ROUTED', 'NOT_ROUTED'], true) ? $routeStateFilter : '',
-    'priority_level' => $priorityLevelFilter,
-    'current_location' => $currentLocationFilter,
-    'storage_area' => $tab === 'routed' ? $storageArea : '',
-    'sort' => $sort,
-  ];
-
-  $allFolders = [];
-  $currentFolder = null;
-  $folders = [];
-  $folderPathMap = [];
-  $users = $isAdmin ? User::allEmployees($pdo) : [];
-  $divisions = $isAdmin ? Division::all($pdo) : [];
-  $divisionEmployees = [];
-  $divisionEmployeeFolders = [];
-  $selectedQueueEmployee = null;
-  $queueDocs = [];
-  $queueCounts = ['pending' => 0, 'approved' => 0, 'rejected' => 0];
-  $docs = [];
-  $trashedFolders = [];
-  $total = 0;
-  $workspaceResults = workspace_global_search($pdo, $uid, $targetUserId, $workspaceQuery, $isAdmin, $isDivisionChief);
-
-  if ($tab === 'shared') {
-    [$docs, $total] = Document::listShared($pdo, $uid, $search, $page, $per, $filters);
-  } elseif ($tab === 'trash') {
-    $trashedFolders = Folder::trashedRootFolders(Folder::listTrashedForUser($pdo, $targetUserId));
-    if ($search !== '') {
-      $trashedFolders = array_values(array_filter($trashedFolders, static function (array $folder) use ($search): bool {
-        return stripos((string)($folder['display_name'] ?? $folder['name'] ?? ''), $search) !== false;
-      }));
-    }
-    $docs = visible_trash_documents(Document::listTrashedForOwner($pdo, $targetUserId, $search, $filters), $trashedFolders);
-    $total = count($trashedFolders) + count($docs);
-    $page = 1;
-    $per = max(1, $total);
-  } elseif ($tab === 'division_queue' && $isDivisionChief) {
-    $divisionId = (int)($_SESSION['user']['division_id'] ?? 0);
-    $divisionEmployees = $divisionId > 0 ? User::listEmployeesByDivision($pdo, $divisionId) : [];
-    $queueIndexDocs = $divisionId > 0 ? Document::listForDivisionChief($pdo, $divisionId, $uid, [
-      'status' => $statusFilter,
-      'search' => $search,
-    ]) : [];
-    $employeeMeta = [];
-    foreach ($divisionEmployees as $employee) {
-      $employeeMeta[(int)$employee['id']] = [
-        'employee' => $employee,
-        'documents' => 0,
-        'pending' => 0,
-        'resolved' => 0,
-        'latest_activity_at' => null,
-        'latest_document_title' => '',
-        'latest_document_code' => '',
-        'latest_location' => '',
-      ];
-    }
-    foreach ($queueIndexDocs as $row) {
-      $ownerId = (int)($row['owner_id'] ?? 0);
-      if (!isset($employeeMeta[$ownerId])) {
-        continue;
-      }
-      $employeeMeta[$ownerId]['documents']++;
-      $status = (string)($row['status'] ?? '');
-      if ($status === 'To be reviewed') {
-        $employeeMeta[$ownerId]['pending']++;
-      } elseif (in_array($status, ['Approved', 'Rejected'], true)) {
-        $employeeMeta[$ownerId]['resolved']++;
-      }
-      $activityAt = trim((string)($row['last_activity_at'] ?? ''));
-      $knownActivityAt = trim((string)($employeeMeta[$ownerId]['latest_activity_at'] ?? ''));
-      if ($activityAt !== '' && ($knownActivityAt === '' || strtotime($activityAt) > strtotime($knownActivityAt))) {
-        $employeeMeta[$ownerId]['latest_activity_at'] = $activityAt;
-        $employeeMeta[$ownerId]['latest_document_title'] = trim((string)($row['title'] ?? '')) !== ''
-          ? (string)$row['title']
-          : (string)($row['name'] ?? '');
-        $employeeMeta[$ownerId]['latest_document_code'] = (string)($row['document_code'] ?? '');
-        $employeeMeta[$ownerId]['latest_location'] = (string)($row['current_location'] ?? '');
-      }
-    }
-    $divisionEmployeeFolders = array_values($employeeMeta);
-    if ($employeeFilter > 0) {
-      foreach ($divisionEmployees as $employee) {
-        if ((int)($employee['id'] ?? 0) === $employeeFilter) {
-          $selectedQueueEmployee = $employee;
-          break;
-        }
-      }
-    }
-
-    $queueDocs = $divisionId > 0 ? Document::listForDivisionChief($pdo, $divisionId, $uid, [
-      'status' => $statusFilter,
-      'employee_id' => $employeeFilter,
-      'search' => $search,
-    ]) : [];
-    foreach ($queueDocs as $row) {
-      $status = (string)($row['status'] ?? '');
-      if ($status === 'To be reviewed') {
-        $queueCounts['pending']++;
-      } elseif ($status === 'Approved') {
-        $queueCounts['approved']++;
-      } elseif ($status === 'Rejected') {
-        $queueCounts['rejected']++;
-      }
-    }
-    $docs = $queueDocs;
-    $total = count($queueDocs);
-  } else {
-    [$docs, $total] = Document::listMy($pdo, $targetUserId, $search, $folder ?: null, $page, $per, false, $filters);
-  }
-
-  $storage = DocumentService::ownerStorageBreakdown($targetUserId);
-  $existingNames = Document::listActiveNamesForOwner($pdo, $targetUserId, null, $tab === 'routed' ? $storageArea : null);
-  $docIds = array_values(array_filter(array_map(static fn(array $row): int => (int)($row['id'] ?? 0), $docs)));
-  $sharedPreview = Document::sharedMembersPreview($pdo, $docIds, 3);
-  $hasSubmittableDocs = false;
-  $submittableFolderIds = [];
-
-  if ($tab === 'routed') {
-    foreach ($docs as $row) {
-      if (can_submit_document_for_review($row)) {
-        $hasSubmittableDocs = true;
-        break;
-      }
-    }
-
-  }
-
-  view('documents/index', [
-    'tab' => $tab,
-    'search' => $search,
-    'folder' => $folder,
-    'page' => $page,
-    'per' => $per,
-    'total' => $total,
-    'docs' => $docs,
-    'trashedFolders' => $trashedFolders,
-    'folders' => $folders,
-    'currentFolder' => $currentFolder,
-    'folderBreadcrumbs' => folder_breadcrumbs($currentFolder),
-    'folderPathMap' => $folderPathMap,
-    'users' => $users,
-    'isAdmin' => $isAdmin,
-    'isDivisionChief' => $isDivisionChief,
-    'targetUserId' => $targetUserId,
-    'selectedUser' => $selectedUser,
-    'storage' => $storage,
-    'existingNames' => $existingNames,
-    'filters' => $filters,
-    'sharedPreview' => $sharedPreview,
-    'hasSubmittableDocs' => $hasSubmittableDocs,
-    'submittableFolderIds' => $submittableFolderIds,
-    'divisionEmployees' => $divisionEmployees,
-    'divisionEmployeeFolders' => $divisionEmployeeFolders,
-    'selectedQueueEmployee' => $selectedQueueEmployee,
-    'queueCounts' => $queueCounts,
-    'employeeFilter' => $employeeFilter,
-    'divisions' => $divisions,
-    'sort' => $sort,
-    'workspaceQuery' => $workspaceQuery,
-    'workspaceResults' => $workspaceResults,
-    'shareRecipients' => User::listShareRecipients($pdo, $targetUserId, (int)($selectedUser['division_id'] ?? 0)),
-  ]);
-}
 
 function upload(): void {
   global $pdo;
   csrf_verify();
 
   $uid = (int)$_SESSION['user']['id'];
-  $ownerId = selected_owner_id($pdo, $uid);
+  // Only admin users may upload files via the UI
+  if (!is_admin_user()) {
+    redirect('/admin/dashboard');
+  }
+  // When an admin uploads, keep the file owned by the admin (staging area).
+  $ownerId = is_admin_user() ? $uid : selected_owner_id($pdo, $uid);
   $folderId = req_int('folder_id', 0) ?: null;
   $storageArea = 'OFFICIAL';
   $owner = User::findById($pdo, $ownerId);
@@ -893,10 +743,10 @@ function upload(): void {
   $baseFolder = $folderId ? Folder::getForUser($pdo, $folderId, $ownerId, $storageArea) : null;
   $baseFolderPath = $baseFolder ? Folder::normalizePath((string)$baseFolder['name']) : '';
   $contextSuffix = documents_context_query_suffix($folderId, $ownerId);
-  $routedRedirectBase = '/documents?tab=routed';
+  $routedRedirectBase = '/admin/dashboard?';
 
   if ($folderId && !$baseFolder) {
-    redirect($routedRedirectBase . '&err=folder_not_found' . documents_context_query_suffix(null, $ownerId));
+    redirect($routedRedirectBase . 'err=folder_not_found' . documents_context_query_suffix(null, $ownerId));
   }
 
   $uploadedEntries = array_merge(
@@ -904,17 +754,26 @@ function upload(): void {
     uploaded_entries_from_request($_FILES['folder_upload'] ?? null, $_POST['file_relative_paths'] ?? $_POST['relative_paths'] ?? [])
   );
   if (request_exceeds_post_max_size()) {
-    redirect($routedRedirectBase . '&err=upload_post_max_exceeded' . $contextSuffix);
+    redirect($routedRedirectBase . 'err=upload_post_max_exceeded' . $contextSuffix);
   }
   $uploadError = upload_request_error_code($_FILES['file'] ?? null);
   if ($uploadError === null) {
     $uploadError = upload_request_error_code($_FILES['folder_upload'] ?? null);
   }
   if ($uploadError !== null) {
-    redirect($routedRedirectBase . '&err=' . upload_error_message_key($uploadError) . $contextSuffix);
+    redirect($routedRedirectBase . 'err=' . upload_error_message_key($uploadError) . $contextSuffix);
   }
   if (empty($uploadedEntries)) {
-    redirect($routedRedirectBase . '&err=upload_failed' . $contextSuffix);
+    redirect($routedRedirectBase . 'err=upload_failed' . $contextSuffix);
+  }
+
+  // Enforce PDF-only uploads
+  foreach ($uploadedEntries as $entryCheck) {
+    $entryNameCheck = (string)($entryCheck['file']['name'] ?? '');
+    $extCheck = strtolower((string)pathinfo($entryNameCheck, PATHINFO_EXTENSION));
+    if ($extCheck !== 'pdf') {
+      redirect($routedRedirectBase . 'err=only_pdf_allowed' . $contextSuffix);
+    }
   }
 
   try {
@@ -939,17 +798,19 @@ function upload(): void {
         continue;
       }
       if ($existing) {
-        redirect($routedRedirectBase . '&err=name_conflict' . $contextSuffix);
+        redirect($routedRedirectBase . 'err=name_conflict' . $contextSuffix);
       }
 
       $tracking = document_tracking_payload($_POST, $entryName, $storageArea, $entryIndex);
       $tracking = document_tracking_apply_batch_rules($tracking, $entryIndex, $totalEntries, $customTitleProvided);
+      // For admin uploads, do not accept a current_location from the form — set to Admin automatically
+      $tracking['current_location'] = 'Admin';
       if (($trackingError = document_tracking_required_error($tracking)) !== null) {
-        redirect($routedRedirectBase . '&err=' . $trackingError . $contextSuffix);
+        redirect($routedRedirectBase . 'err=' . $trackingError . $contextSuffix);
       }
       $pdo->beginTransaction();
       try {
-        $docId = DocumentService::upload(
+        DocumentService::upload(
           $pdo,
           $entry['file'],
           $ownerId,
@@ -959,15 +820,6 @@ function upload(): void {
           $divisionId > 0 ? $divisionId : null,
           $tracking
         );
-        DocumentRoute::add(
-          $pdo,
-          $docId,
-          null,
-          (string)$tracking['current_location'],
-          (string)$tracking['routing_status'],
-          document_route_note('upload', $tracking, $entryName),
-          $uid
-        );
         $pdo->commit();
       } catch (Throwable $entryError) {
         if ($pdo->inTransaction()) {
@@ -976,12 +828,13 @@ function upload(): void {
         throw $entryError;
       }
     }
+
   } catch (Throwable $e) {
     upload_debug_log($e);
-    redirect($routedRedirectBase . '&err=upload_failed' . $contextSuffix);
+    redirect($routedRedirectBase . 'err=upload_failed' . $contextSuffix);
   }
 
-  redirect('/documents?tab=routed&msg=uploaded' . $contextSuffix);
+  redirect('/admin/dashboard?msg=uploaded');
 }
 
 function uploaded_entries_from_request(?array $fileBag, array $relativeOverrides = []): array {
@@ -1207,6 +1060,10 @@ function document_docx_relationships(ZipArchive $zip, string $relsPath): array {
 
   $relationships = [];
   foreach ($dom->getElementsByTagName('Relationship') as $relationship) {
+    if (!($relationship instanceof DOMElement)) {
+      continue;
+    }
+
     $id = trim((string)$relationship->getAttribute('Id'));
     $type = trim((string)$relationship->getAttribute('Type'));
     $target = trim((string)$relationship->getAttribute('Target'));
@@ -1456,10 +1313,93 @@ function document_preview_payload(array $doc, ?array $latest): array {
 }
 
 function create_document(): void {
+  global $pdo;
   csrf_verify();
   $uid = (int)($_SESSION['user']['id'] ?? 0);
   $ownerId = max(1, req_int('target_user_id', $uid));
-  redirect('/documents?tab=routed&err=file_creation_disabled&user_id='.$ownerId);
+  $folderId = req_int('folder_id', 0);
+  $storageArea = req_str('storage_area', 'OFFICIAL');
+  // Disable in-app file creation entirely.
+  redirect('/admin/dashboard');
+
+  $extension = strtolower(req_str('document_extension', 'xlsx'));
+  $acceptHeader = strtolower((string)($_SERVER['HTTP_ACCEPT'] ?? ''));
+  $requestedWith = strtolower((string)($_SERVER['HTTP_X_REQUESTED_WITH'] ?? ''));
+  $isJsonRequest = str_contains($acceptHeader, 'application/json') || $requestedWith === 'xmlhttprequest';
+
+  $respondCreate = static function (int $status, array $payload) use ($isJsonRequest): void {
+    if ($isJsonRequest) {
+      http_response_code($status);
+      header('Content-Type: application/json; charset=utf-8');
+      echo json_encode($payload);
+      exit;
+    }
+  };
+
+  $refreshUrl = '/documents?tab=routed' . documents_context_query_suffix($folderId, $ownerId);
+
+  if (!in_array($extension, ['docx', 'xlsx'], true)) {
+    $respondCreate(422, ['ok' => false, 'message' => 'Unsupported document type.']);
+    redirect('/admin/dashboard');
+  }
+
+  $divisionId = 0;
+  if ($ownerId > 0) {
+    $owner = User::findById($pdo, $ownerId);
+    $divisionId = (int)($owner['division_id'] ?? 0);
+  }
+
+  $fallbackName = $extension === 'docx' ? 'Untitled Document.docx' : 'Untitled Spreadsheet.xlsx';
+  $tracking = document_tracking_payload($_POST, $fallbackName, $storageArea);
+  if (($trackingError = document_tracking_required_error($tracking)) !== null) {
+    $respondCreate(422, ['ok' => false, 'message' => ui_message($trackingError)]);
+    redirect('/admin/dashboard');
+  }
+
+  try {
+    $pdo->beginTransaction();
+    $docId = DocumentService::createBlankEditableDocument(
+      $pdo,
+      $ownerId,
+      $extension,
+      $uid,
+      $storageArea,
+      $divisionId > 0 ? $divisionId : null,
+      $tracking,
+      $folderId > 0 ? $folderId : null
+    );
+    DocumentRoute::add(
+      $pdo,
+      $docId,
+      null,
+      (string)$tracking['current_location'],
+      (string)$tracking['routing_status'],
+      document_route_note('create', $tracking, $fallbackName),
+      $uid
+    );
+    $pdo->commit();
+  } catch (Throwable $e) {
+    if ($pdo->inTransaction()) {
+      $pdo->rollBack();
+    }
+    $respondCreate(500, ['ok' => false, 'message' => 'Unable to create blank file.']);
+    redirect('/admin/dashboard');
+  }
+
+  $openUrl = '/documents/view?id=' . $docId . '&open_editor=1';
+  if ($ownerId !== $uid) {
+    $openUrl .= '&user_id=' . $ownerId;
+  }
+
+  if ($isJsonRequest) {
+    $respondCreate(200, [
+      'ok' => true,
+      'open_url' => wdms_base_url_path($openUrl),
+      'refresh_url' => wdms_base_url_path($refreshUrl),
+    ]);
+  }
+
+  redirect($openUrl);
 }
 
 function view_doc(): void {
@@ -1602,6 +1542,9 @@ function replace_file(): void {
   if (document_is_finalized($doc)) {
     redirect('/documents/view?id='.$docId.'&err=decision_already_final&user_id='.(int)$doc['owner_id']);
   }
+  if (strtolower((string)pathinfo((string)($doc['name'] ?? ''), PATHINFO_EXTENSION)) === 'pdf') {
+    redirect('/documents/view?id='.$docId.'&err=feature_retired&user_id='.(int)$doc['owner_id']);
+  }
   if (is_approval_locked($doc) && !is_admin_user()) {
     redirect('/documents/view?id='.$docId.'&err=approval_locked&user_id='.(int)$doc['owner_id']);
   }
@@ -1617,7 +1560,20 @@ function replace_file(): void {
       redirect('/documents/view?id='.$docId.'&err='.$trackingError.'&user_id='.(int)$doc['owner_id']);
     }
     Document::updateMetadata($pdo, $docId, $tracking);
-    DocumentService::uploadNewVersion($pdo, $docId, $_FILES['file'], $uid);
+    $editedFields = [];
+    foreach (['document_code', 'title', 'signatory', 'priority_level', 'document_date', 'category', 'tags'] as $field) {
+      $before = trim((string)($doc[$field] ?? ''));
+      $after = trim((string)($tracking[$field] ?? ''));
+      if ($before !== $after) {
+        $editedFields[] = $field;
+      }
+    }
+    $editNote = empty($editedFields)
+      ? null
+      : 'updated_fields=' . implode('|', $editedFields);
+
+    DocumentService::uploadNewVersionWithNote($pdo, $docId, $_FILES['file'], $uid, $editNote);
+
     redirect('/documents/view?id='.$docId.'&msg=file_replaced');
   } catch (Throwable $e) {
     redirect('/documents/view?id='.$docId.'&err=file_replace_failed');
@@ -1644,15 +1600,49 @@ function soft_delete(): void {
 
   Document::softDelete($pdo, $docId, $uid, req_str('reason', '') ?: null);
   AuditLog::add($pdo, $uid, "Soft-deleted document", $docId, null);
-  redirect('/documents?tab=routed&msg=deleted&user_id='.(int)$doc['owner_id']);
+  redirect('/admin/dashboard?msg=deleted');
+}
+
+function admin_delete_document(): void {
+  global $pdo;
+  csrf_verify();
+
+  if (!is_admin_user()) {
+    http_response_code(403);
+    die("403 Forbidden");
+  }
+
+  if (!document_admin_reauth_ok($pdo, req_str('confirm_password', ''))) {
+    redirect('/admin/dashboard?err=reauth_failed');
+  }
+
+  $uid = (int)($_SESSION['user']['id'] ?? 0);
+  $docId = request_document_id();
+  $doc = Document::get($pdo, $docId);
+  if (!$doc) {
+    redirect('/admin/dashboard?err=not_found');
+  }
+
+  try {
+    $deletedCount = purge_trash_items($pdo, (int)($doc['owner_id'] ?? 0), [], [$docId]);
+  } catch (Throwable $e) {
+    redirect('/admin/dashboard?err=trash_empty_failed');
+  }
+
+  if ($deletedCount < 1) {
+    redirect('/admin/dashboard?err=not_found');
+  }
+
+  AuditLog::add($pdo, $uid, "Permanently deleted document", $docId, "owner_id=" . (int)($doc['owner_id'] ?? 0));
+  redirect('/admin/dashboard?msg=file_deleted');
 }
 
 function move_doc_to_official(): void {
-  redirect('/documents?tab=routed&msg=feature_retired');
+  redirect('/admin/dashboard?msg=feature_retired');
 }
 
 function move_doc_to_private(): void {
-  redirect('/documents?tab=routed&msg=feature_retired');
+  redirect('/admin/dashboard?msg=feature_retired');
 }
 
 function manage_selected_documents(): void {
@@ -1666,7 +1656,7 @@ function manage_selected_documents(): void {
   $ownerId = selected_owner_id($pdo, $uid);
 
   if (empty($documentIds) && empty($folderIds)) {
-    redirect('/documents?tab=routed&err=not_found&user_id='.$ownerId);
+    redirect('/admin/dashboard');
   }
 
   if ($action === 'delete') {
@@ -1683,7 +1673,7 @@ function manage_selected_documents(): void {
         continue;
       }
       if (folder_tree_locked_document_exists($pdo, $ownerId, (string)$folder['name'], $sourceStorageArea) && !is_admin_user()) {
-        redirect('/documents?tab=' . strtolower($sourceStorageArea) . '&err=approval_locked&user_id='.$ownerId);
+        redirect('/admin/dashboard');
       }
       $tree = Folder::listTreeForUser($pdo, $ownerId, (string)$folder['name'], $sourceStorageArea);
       foreach ($tree as $treeFolder) {
@@ -1692,7 +1682,7 @@ function manage_selected_documents(): void {
       Folder::softDeleteTreeForUser($pdo, $ownerId, (string)$folder['name'], $uid, $sourceStorageArea);
     }
     AuditLog::add($pdo, $uid, "Managed selected documents", null, "action=delete");
-    redirect('/documents?tab=routed&msg=deleted&user_id='.$ownerId);
+    redirect('/admin/dashboard?msg=deleted');
   }
 
   if ($action === 'submit_for_review') {
@@ -1721,26 +1711,20 @@ function manage_selected_documents(): void {
       if (!can_submit_document_for_review($doc)) {
         continue;
       }
-      $divisionId = (int)($doc['division_id'] ?? 0);
-      if ($divisionId <= 0) {
+      try {
+        DocumentReviewService::submitForReview($pdo, $doc, $uid);
+      } catch (RuntimeException $e) {
         continue;
       }
-      $division = Division::find($pdo, $divisionId);
-      if (!$division || (int)($division['chief_user_id'] ?? 0) <= 0) {
-        continue;
-      }
-      Document::submitForReview($pdo, $docId, $divisionId);
-      Notification::add($pdo, (int)$division['chief_user_id'], "Routed file awaiting review", (string)$doc['name'], "/documents/view?id=".$docId);
-      AuditLog::add($pdo, $uid, "Submitted routed file for review", $docId, "division_id=".$divisionId.", bulk=1");
     }
-    redirect('/documents?tab=routed&msg=submitted_for_review&user_id='.$ownerId);
+    redirect('/admin/dashboard?msg=submitted_for_review');
   }
 
   if (!in_array($action, ['move_to_official', 'move_to_private'], true)) {
-    redirect('/documents?tab=routed&err=not_found&user_id='.$ownerId);
+    redirect('/admin/dashboard');
   }
 
-  redirect('/documents?tab=routed&msg=feature_retired&user_id='.$ownerId);
+  redirect('/admin/dashboard?msg=feature_retired');
 }
 
 function restore_doc(): void {
@@ -1749,12 +1733,12 @@ function restore_doc(): void {
   $uid = (int)$_SESSION['user']['id'];
   $docId = request_document_id();
   $doc = Document::get($pdo, $docId);
-  if (!$doc) { redirect('/documents?tab=trash&err=not_found'); }
+  if (!$doc) { redirect('/admin/dashboard'); }
   if (!can_manage_document($doc, $uid)) { http_response_code(403); die("403 owner only"); }
 
   Document::restore($pdo, $docId);
   AuditLog::add($pdo, $uid, "Restored document", $docId, null);
-  redirect('/documents?tab=trash&msg=restored&user_id='.(int)$doc['owner_id']);
+  redirect('/admin/dashboard');
 }
 
 function restore_folder(): void {
@@ -1766,7 +1750,7 @@ function restore_folder(): void {
   $folderId = request_folder_id();
   $folder = Folder::getTrashedForUser($pdo, $folderId, $ownerId);
   if (!$folder) {
-    redirect('/documents?tab=trash&err=not_found&user_id=' . $ownerId);
+    redirect('/admin/dashboard');
   }
 
   $storageArea = (string)($folder['storage_area'] ?? 'OFFICIAL');
@@ -1779,7 +1763,7 @@ function restore_folder(): void {
   }
 
   AuditLog::add($pdo, $uid, "Restored folder", null, "folder_id=" . $folderId);
-  redirect('/documents?tab=trash&msg=restored&user_id=' . $ownerId);
+  redirect('/admin/dashboard?msg=restored');
 }
 
 function delete_selected_trash(): void {
@@ -1788,7 +1772,7 @@ function delete_selected_trash(): void {
 
   $uid = (int)($_SESSION['user']['id'] ?? 0);
   if (!require_reauth($pdo, $uid, req_str('confirm_password', ''))) {
-    redirect('/documents?tab=trash&err=reauth_failed');
+    redirect('/admin/dashboard');
   }
 
   $ownerId = selected_owner_id($pdo, $uid);
@@ -1798,7 +1782,7 @@ function delete_selected_trash(): void {
 
   foreach ($requestedDocumentIds as $docId) {
     $doc = Document::get($pdo, $docId);
-    if ($doc && (int)($doc['owner_id'] ?? 0) === $ownerId && (string)($doc['deleted_at'] ?? '') !== '') {
+    if ($doc && (int)($doc['owner_id'] ?? 0) === $ownerId && ((string)($doc['deleted_at'] ?? '') !== '' || document_is_finalized($doc))) {
       $documentIds[] = $docId;
     }
   }
@@ -1815,17 +1799,17 @@ function delete_selected_trash(): void {
   $documentIds = array_values(array_filter($documentIds, static fn(int $id): bool => $id > 0));
   $folderIds = array_values(array_filter($folderIds, static fn(int $id): bool => $id > 0));
   if (empty($documentIds) && empty($folderIds)) {
-    redirect('/documents?tab=trash&err=not_found&user_id='.$ownerId);
+    redirect('/admin/dashboard');
   }
 
   try {
-    $deletedCount = purge_trash_items($pdo, $ownerId, $folderIds, $documentIds);
+    $deletedCount = purge_permanent_items($pdo, $ownerId, $folderIds, $documentIds);
   } catch (Throwable $e) {
-    redirect('/documents?tab=trash&err=trash_empty_failed&user_id='.$ownerId);
+    redirect('/admin/dashboard');
   }
 
   AuditLog::add($pdo, $uid, "Permanently deleted trash selection", null, "owner_id=".$ownerId.", count=".$deletedCount);
-  redirect('/documents?tab=trash&msg=trash_selection_deleted&user_id='.$ownerId);
+  redirect('/admin/dashboard?msg=trash_deleted');
 }
 
 function checkout_doc(): void {
@@ -1862,6 +1846,39 @@ function update_metadata(): void {
   Document::updateMetadata($pdo, $docId, $tracking);
   AuditLog::add($pdo, $uid, "Updated document tracking details", $docId, (string)($tracking['document_code'] ?? ''));
   redirect('/documents/view?id='.$docId.'&msg=metadata_saved&user_id='.(int)$doc['owner_id']);
+}
+
+function rename_document_title(): void {
+  global $pdo;
+  csrf_verify();
+
+  $uid = (int)($_SESSION['user']['id'] ?? 0);
+  $docId = req_int('id', 0);
+  $folderId = req_int('folder_id', 0) ?: null;
+
+  $doc = Document::get($pdo, $docId);
+  if (!$doc) {
+    redirect('/documents?err=not_found');
+  }
+  if (!can_manage_document($doc, $uid)) {
+    http_response_code(403);
+    die("403 owner only");
+  }
+  if (document_is_finalized($doc)) {
+    redirect('/admin/dashboard');
+  }
+  if (is_approval_locked($doc) && !is_admin_user()) {
+    redirect('/admin/dashboard');
+  }
+
+  $title = mb_substr(trim((string)($_POST['title'] ?? '')), 0, 255);
+  if ($title === '') {
+    redirect('/admin/dashboard');
+  }
+
+  Document::updateTitle($pdo, $docId, $title);
+  AuditLog::add($pdo, $uid, "Renamed document title", $docId, $title);
+  redirect('/admin/dashboard?msg=metadata_saved');
 }
 
 function route_document(): void {
@@ -1948,7 +1965,7 @@ function bulk_action(): void {
   $action = req_str('action', '');
   $ids = $_POST['ids'] ?? [];
   if (!is_array($ids) || empty($ids)) {
-    redirect('/documents?tab=trash&err=not_found');
+    redirect('/admin/dashboard');
   }
 
   foreach (array_values(array_unique(array_map('intval', $ids))) as $docId) {
@@ -1964,7 +1981,7 @@ function bulk_action(): void {
   }
 
   AuditLog::add($pdo, $uid, "Bulk action", null, "action=".$action);
-  redirect('/documents?tab=' . ($action === 'restore' ? 'trash&msg=restored' : 'routed&msg=deleted'));
+  redirect('/admin/dashboard?msg=' . ($action === 'restore' ? 'restored' : 'deleted'));
 }
 
 function require_reauth(PDO $pdo, int $userId, string $password): bool {
