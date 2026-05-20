@@ -29,14 +29,15 @@ foreach ($activitySummary as $row) {
   <section class="workspace-hero">
     <div class="workspace-hero__content">
       <div class="workspace-hero__eyebrow">Administrator Control Panel</div>
-      <h1 class="workspace-hero__title">Run WDMS like a database-backed workspace.</h1>
+      <h1 class="workspace-hero__title">Run CDD-File-Tracking-System like a database-backed workspace.</h1>
       <p class="workspace-hero__copy">
         Monitor users, storage, audit trails, and document activity from one command surface aligned with the
         capstone goal: centralized storage, secure collaboration, desktop editing workflow, and version control.
       </p>
       <div class="workspace-hero__actions">
-        <a class="btn btn-light btn-sm" href="<?= BASE_URL ?>/documents"><i class="bi bi-folder2-open me-1"></i>Open workspace</a>
+        <a class="btn btn-light btn-sm" href="<?= BASE_URL ?>/admin/dashboard"><i class="bi bi-inbox me-1"></i>Open routing queue</a>
         <a class="btn btn-outline-light btn-sm" href="<?= BASE_URL ?>/admin/users"><i class="bi bi-people me-1"></i>Manage users</a>
+        <!-- Organization chart removed -->
         <a class="btn btn-outline-light btn-sm" href="<?= BASE_URL ?>/admin/logs"><i class="bi bi-clipboard-data me-1"></i>View audit logs</a>
       </div>
     </div>
@@ -66,7 +67,7 @@ foreach ($activitySummary as $row) {
   </section>
 
   <section class="quick-links">
-    <a class="quick-link" href="<?= BASE_URL ?>/documents">
+    <a class="quick-link" href="<?= BASE_URL ?>/admin/dashboard">
       <span class="quick-link__icon"><i class="bi bi-folder2-open"></i></span>
       <span class="quick-link__kicker">Workspace</span>
       <span class="quick-link__title">Document repository</span>
@@ -84,6 +85,7 @@ foreach ($activitySummary as $row) {
       <span class="quick-link__title">Audit monitoring</span>
       <span class="quick-link__copy">Inspect document events, sharing changes, and operational actions over time.</span>
     </a>
+    <!-- Organization chart quick link removed -->
   </section>
 
   <section class="surface-card">

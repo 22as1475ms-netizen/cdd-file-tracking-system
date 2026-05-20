@@ -59,6 +59,23 @@ class Permission {
     return $s->fetchAll();
   }
 
+  public static function currentAcceptedUserId(PDO $pdo, int $docId): ?int {
+    $s = $pdo->prepare("
+      SELECT user_id
+      FROM permissions
+      WHERE document_id = ?
+        AND accepted_at IS NOT NULL
+      ORDER BY accepted_at DESC, id DESC
+      LIMIT 1
+    ");
+    $s->execute([$docId]);
+    $value = $s->fetchColumn();
+    if ($value === false) {
+      return null;
+    }
+    return (int)$value;
+  }
+
   public static function deleteByDocumentIds(PDO $pdo, array $docIds): int {
     if (empty($docIds)) {
       return 0;

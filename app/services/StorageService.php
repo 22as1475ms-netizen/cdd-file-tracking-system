@@ -14,10 +14,12 @@ class StorageService {
       'k' => $key,
       'download' => $download ? '1' : '0',
     ]);
-    return wdms_base_url_path('/media/file?' . $query);
+    return cddfts_base_url_path('/media/file?' . $query);
   }
 
   public static function storeUploadedFile(PDO $pdo, array $file, string $logicalPath, array $meta = []): bool {
+    // Binary file handling is intentionally centralized here so the app can swap
+    // storage backends without changing document/routing code everywhere else.
     $tmpPath = (string)($file['tmp_name'] ?? '');
     if ($tmpPath === '' || !self::isAcceptedUploadSource($tmpPath)) {
       return false;
@@ -224,7 +226,7 @@ class StorageService {
       return null;
     }
 
-    $tmp = tempnam(sys_get_temp_dir(), 'wdms_');
+    $tmp = tempnam(sys_get_temp_dir(), 'cddfts_');
     if ($tmp === false) {
       return null;
     }
@@ -346,11 +348,7 @@ class StorageService {
     }
 
     if (str_starts_with($normalized, 'public/avatars/')) {
-      return wdms_public_upload_dir('avatars') . DIRECTORY_SEPARATOR . basename($normalized);
-    }
-
-    if (str_starts_with($normalized, 'public/chat/')) {
-      return wdms_public_upload_dir('chat') . DIRECTORY_SEPARATOR . basename($normalized);
+      return cddfts_public_upload_dir('avatars') . DIRECTORY_SEPARATOR . basename($normalized);
     }
 
     return null;
@@ -389,7 +387,7 @@ class StorageService {
       return true;
     }
 
-    return defined('WDMS_TEST_MODE') && WDMS_TEST_MODE && is_file($tmpName);
+    return defined('CDDFTS_TEST_MODE') && CDDFTS_TEST_MODE && is_file($tmpName);
   }
 
   private static function moveIncomingFile(string $sourcePath, string $targetPath): bool {
@@ -397,7 +395,7 @@ class StorageService {
       return true;
     }
 
-    if (!(defined('WDMS_TEST_MODE') && WDMS_TEST_MODE)) {
+    if (!(defined('CDDFTS_TEST_MODE') && CDDFTS_TEST_MODE)) {
       return false;
     }
 

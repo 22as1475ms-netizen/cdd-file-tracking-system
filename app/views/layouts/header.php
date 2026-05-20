@@ -2,16 +2,37 @@
 require_once __DIR__ . "/../../config/app.php";
 require_once __DIR__ . "/../../helpers/http.php";
 require_once __DIR__ . "/../../models/Notification.php";
+require_once __DIR__ . "/../../models/User.php";
 
 $currentPath = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
-$isAuthPage = $currentPath === (BASE_URL . '/login') || str_ends_with($currentPath, '/login');
+$baseRootPath = BASE_URL !== '' ? BASE_URL : '/';
+$isAuthPage = $currentPath === $baseRootPath
+  || $currentPath === rtrim($baseRootPath, '/') . '/'
+  || $currentPath === (BASE_URL . '/login')
+  || str_ends_with($currentPath, '/login');
 $isWorkspacePage = $currentPath === (BASE_URL . '/documents') || str_ends_with($currentPath, '/documents');
 $user = $_SESSION['user'] ?? null;
+$userRole = strtoupper((string)($user['role'] ?? ''));
+$isAdminArea = $user && in_array($userRole, ['SUPER_ADMIN', 'ADMIN', 'SECTION_ADMIN'], true);
 $initials = $user ? avatar_initials((string)$user['name']) : '';
 $avatarPhoto = $user ? avatar_photo_url($user) : null;
 $avatarPreset = $user ? avatar_preset_key($user) : 'preset-ocean';
+$headerRoleLabel = $user ? role_label((string)$user['role']) : '';
+if ($user && $userRole === 'SECTION_ADMIN') {
+  $divisionName = trim((string)($user['division_name'] ?? ''));
+  if ($divisionName === '' && isset($pdo)) {
+    $freshUser = User::findById($pdo, (int)($user['id'] ?? 0));
+    $divisionName = trim((string)($freshUser['division_name'] ?? ''));
+  }
+  if ($divisionName !== '') {
+    $headerRoleLabel = $divisionName . ' Section Admin';
+  }
+}
 $onboardingVersionMap = [
+  'SUPER_ADMIN' => 'super-admin-v1',
   'ADMIN' => 'admin-v1',
+  'SECTION_ADMIN' => 'section-admin-v1',
+  'SECTION_STAFF' => 'section-staff-v1',
   'DIVISION_CHIEF' => 'division-chief-v1',
   'EMPLOYEE' => 'employee-v1',
 ];
@@ -34,11 +55,18 @@ $notificationTone = static function (array $n): array {
   if ($haystack !== '' && (str_contains($haystack, 'review') || str_contains($haystack, 'pending') || str_contains($haystack, 'request'))) {
     return ['warning', 'bi-exclamation-circle-fill'];
   }
-  if ($haystack !== '' && (str_contains($haystack, 'message') || str_contains($haystack, 'chat'))) {
-    return ['info', 'bi-chat-left-text-fill'];
-  }
   return ['info', 'bi-bell-fill'];
 };
+$notificationBootstrapItems = array_map(static function (array $row): array {
+  return [
+    'id' => (int)($row['id'] ?? 0),
+    'title' => (string)($row['title'] ?? ''),
+    'body' => (string)($row['body'] ?? ''),
+    'link' => Notification::resolveDestination($row),
+    'is_read' => (int)($row['is_read'] ?? 0) === 1,
+    'created_at' => (string)($row['created_at'] ?? ''),
+  ];
+}, $unreadItems);
 ?>
 <!doctype html>
 <html lang="en">
@@ -51,12 +79,12 @@ $notificationTone = static function (array $n): array {
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css" rel="stylesheet">
   <script>
     (function () {
       try {
-        var storedMode = localStorage.getItem('wdms-color-mode');
-        var storedChatTheme = localStorage.getItem('wdms-chat-theme');
-        var storedPerformanceMode = localStorage.getItem('wdms-performance-mode');
+        var storedMode = localStorage.getItem('cddfts-color-mode');
+        var storedPerformanceMode = localStorage.getItem('cddfts-performance-mode');
         var validPerformanceModes = ['auto', 'lite', 'full'];
         var performanceMode = validPerformanceModes.indexOf(storedPerformanceMode) >= 0 ? storedPerformanceMode : 'auto';
         var prefersReducedMotion = false;
@@ -75,10 +103,9 @@ $notificationTone = static function (array $n): array {
             ? 'full'
             : ((prefersReducedMotion || saveData || deviceMemory <= 4 || hardwareConcurrency <= 4) ? 'lite' : 'full'));
         document.documentElement.setAttribute('data-color-mode', storedMode === 'dark' ? 'dark' : 'light');
-        document.documentElement.setAttribute('data-chat-theme', storedChatTheme || 'ocean');
         document.documentElement.setAttribute('data-performance-mode', performanceMode);
         document.documentElement.setAttribute('data-performance-tier', computedPerformanceTier);
-        window.wdmsPerformance = {
+        window.cddftsPerformance = {
           mode: performanceMode,
           tier: computedPerformanceTier,
           prefersReducedMotion: prefersReducedMotion,
@@ -88,7 +115,6 @@ $notificationTone = static function (array $n): array {
         };
       } catch (_err) {
         document.documentElement.setAttribute('data-color-mode', 'light');
-        document.documentElement.setAttribute('data-chat-theme', 'ocean');
         document.documentElement.setAttribute('data-performance-mode', 'auto');
         document.documentElement.setAttribute('data-performance-tier', 'full');
       }
@@ -107,9 +133,19 @@ $notificationTone = static function (array $n): array {
         </span>
         <span>
           <span class="d-block app-brand__name"><?= e(APP_NAME) ?></span>
-          <span class="d-block app-brand__meta">Database Workspace</span>
+          <span class="d-block app-brand__meta">Workspace</span>
         </span>
       </a>
+
+      <?php if($isAdminArea): ?>
+        <nav class="app-nav__admin" aria-label="Admin navigation">
+          <a class="app-nav__admin-link <?= $currentPath === BASE_URL . '/admin/dashboard' ? 'is-active' : '' ?>" href="<?= BASE_URL ?>/admin/dashboard"><i class="bi bi-folder2-open"></i><span>Route Files</span></a>
+          <a class="app-nav__admin-link <?= $currentPath === BASE_URL . '/admin/users' ? 'is-active' : '' ?>" href="<?= BASE_URL ?>/admin/users"><i class="bi bi-people"></i><span>Accounts</span></a>
+          <?php if(in_array($userRole, ['SUPER_ADMIN', 'ADMIN'], true)): ?>
+            <a class="app-nav__admin-link <?= $currentPath === BASE_URL . '/admin/logs' ? 'is-active' : '' ?>" href="<?= BASE_URL ?>/admin/logs"><i class="bi bi-clipboard-data"></i><span>Audit Logs</span></a>
+          <?php endif; ?>
+        </nav>
+      <?php endif; ?>
 
       <?php if($user && $isWorkspacePage): ?>
         <?php
@@ -146,15 +182,7 @@ $notificationTone = static function (array $n): array {
                     <?php foreach($unreadItems as $n): ?>
                       <?php [$tone, $icon] = $notificationTone($n); ?>
                       <?php $rawLink = trim(Notification::resolveDestination($n)); ?>
-                    <?php if($rawLink === 'chat://open'): ?>
-                      <button type="button" class="dropdown-item app-notification-item app-notification-item--<?= e($tone) ?> <?= (int)($n['is_read'] ?? 0) === 1 ? 'is-read' : '' ?> js-open-chat-from-notification">
-                        <span class="app-notification-item__icon"><i class="bi <?= e($icon) ?>"></i></span>
-                        <span class="app-notification-item__content">
-                          <strong><?= e((string)$n['title']) ?></strong>
-                          <small><?= e((string)($n['body'] ?? '')) ?></small>
-                        </span>
-                      </button>
-                    <?php elseif($rawLink !== ''): ?>
+                    <?php if($rawLink !== ''): ?>
                       <?php $href = (str_starts_with($rawLink, 'http://') || str_starts_with($rawLink, 'https://')) ? $rawLink : (BASE_URL . (str_starts_with($rawLink, '/') ? $rawLink : ('/' . $rawLink))); ?>
                       <a class="dropdown-item app-notification-item app-notification-item--<?= e($tone) ?> <?= (int)($n['is_read'] ?? 0) === 1 ? 'is-read' : '' ?>" href="<?= e($href) ?>">
                         <span class="app-notification-item__icon"><i class="bi <?= e($icon) ?>"></i></span>
@@ -197,13 +225,12 @@ $notificationTone = static function (array $n): array {
               </span>
               <span class="app-user-pill__meta">
                 <strong><?= e($user['name']) ?></strong>
-                <span><?= e(role_label((string)$user['role'])) ?></span>
+                <span><?= e($headerRoleLabel) ?></span>
               </span>
               <i class="bi bi-chevron-down ms-1"></i>
             </button>
             <div class="dropdown-menu dropdown-menu-end p-2">
               <a class="dropdown-item" href="<?= BASE_URL ?>/account/password"><i class="bi bi-person-gear me-2"></i>Profile</a>
-              <a class="dropdown-item" href="<?= BASE_URL ?>/documents"><i class="bi bi-folder2-open me-2"></i>Workspace</a>
               <button class="dropdown-item app-theme-toggle" type="button" id="toggle-color-mode" role="switch" aria-checked="false">
                 <span class="app-theme-toggle__copy">
                   <i class="bi bi-moon-stars" id="toggle-color-mode-icon"></i>
@@ -239,10 +266,10 @@ $notificationTone = static function (array $n): array {
     let latestSuggestionQuery = '';
 
     function getNavSearchDataset() {
-      if (!Array.isArray(window.wdmsNavSearchDataset)) {
+      if (!Array.isArray(window.cddftsNavSearchDataset)) {
         return [];
       }
-      return window.wdmsNavSearchDataset;
+      return window.cddftsNavSearchDataset;
     }
 
     function escapeHtml(value) {
@@ -370,7 +397,7 @@ $notificationTone = static function (array $n): array {
       closeSuggestions();
     });
 
-    window.addEventListener('wdms-nav-search-data-ready', function () {
+    window.addEventListener('cddfts-nav-search-data-ready', function () {
       if (document.activeElement === navSearchInput || latestSuggestionQuery) {
         renderSuggestions(navSearchInput.value);
       }
@@ -378,3 +405,7 @@ $notificationTone = static function (array $n): array {
   })();
 </script>
 <div class="container-fluid app-shell">
+<script>
+  window.cddftsInitialNotifications = <?= json_encode($notificationBootstrapItems, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
+  window.cddftsNotificationViewerId = <?= (int)($user['id'] ?? 0) ?>;
+</script>

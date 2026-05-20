@@ -10,7 +10,7 @@ function e(string $s): string {
 }
 function app_url(string $path=''): string {
   if (defined('APP_URL') && APP_URL !== '') {
-    return APP_URL . wdms_base_url_path($path);
+    return APP_URL . cddfts_base_url_path($path);
   }
 
   $scheme = 'http';
@@ -21,7 +21,7 @@ function app_url(string $path=''): string {
   }
 
   $host = (string)($_SERVER['HTTP_HOST'] ?? 'localhost');
-  return $scheme . '://' . $host . wdms_base_url_path($path);
+  return $scheme . '://' . $host . cddfts_base_url_path($path);
 }
 
 function app_url_is_publicly_reachable(?string $url = null): bool {
@@ -59,6 +59,7 @@ function ui_message(string $raw): string {
     'version_uploaded' => 'File replaced.',
     'file_replaced' => 'File replaced.',
     'deleted' => 'File moved to trash.',
+    'file_deleted' => 'File permanently deleted.',
     'moved_to_official' => 'This older storage move is no longer used.',
     'folder_moved_to_official' => 'This older storage move is no longer used.',
     'moved_to_private' => 'This older storage move is no longer used.',
@@ -75,6 +76,8 @@ function ui_message(string $raw): string {
     'trash_emptied' => 'Trash permanently emptied.',
     'trash_already_empty' => 'Trash is already empty.',
     'file_creation_disabled' => 'In-app file creation is disabled. Upload files instead.',
+    'only_pdf_allowed' => 'Only PDF uploads are allowed.',
+    'permission_denied' => 'You do not have permission to perform that action.',
     'name_conflict' => 'A file with the same name already exists in this folder.',
     'upload_failed' => 'Upload failed. Please try again.',
     'upload_ini_size_exceeded' => 'Upload failed because the file exceeds the server upload_max_filesize limit.',
@@ -100,14 +103,17 @@ function ui_message(string $raw): string {
     'route_saved' => 'Document route updated.',
     'feature_retired' => 'That older document-management feature is no longer used in this workflow.',
     'approval_locked' => 'This file is locked for review/approval until the current review cycle is resolved.',
-    'message_sent' => 'Message sent successfully.',
-    'message_invalid' => 'Please enter recipient email and message.',
     'submitted_for_review' => 'Routed file submitted to the section chief.',
     'review_assignment_accepted' => 'Section chief accepted the document for review.',
     'review_assignment_declined' => 'Review assignment was declined.',
     'review_acceptance_required' => 'The section chief must accept the routed document before approving or rejecting it.',
+    'review_escalated' => 'Routed file escalated to the division chief.',
+    'section_chief_required' => 'No section chief is assigned to this member yet.',
+    'escalation_not_available' => 'This file is not waiting for section chief escalation.',
+    'division_chief_same_as_section_chief' => 'Assign a separate division chief before escalating this file.',
     'share_accepted' => 'Shared document accepted.',
     'share_declined' => 'Shared document not accepted.',
+    'route_lifecycle_completed' => 'Route lifecycle completed and returned to admin.',
     'response_note_required' => 'Please provide the reason before declining the routed document.',
     'document_approved' => 'Routed file approved and locked.',
     'document_rejected' => 'Routed file rejected. You can edit and resubmit.',
@@ -115,18 +121,18 @@ function ui_message(string $raw): string {
     'decision_already_final' => 'This review decision is already final for the current cycle.',
     'decision_invalid' => 'Invalid review decision.',
     'division_required' => 'Assign a division before using this workflow.',
-    'division_chief_required' => 'No section chief is assigned to this division yet.',
+    'division_chief_required' => 'No division chief is assigned to this division yet.',
     'private_not_reviewable' => 'This older storage rule is no longer used in the routed workflow.',
-    'chat_unavailable' => 'Chat is only available for section chiefs and employees.',
     'reauth_required' => 'Please confirm your password for this action.',
     'reauth_failed' => 'Password confirmation failed.',
     'session_expired' => 'Session expired due to inactivity. Please sign in again.',
-    'user_created' => 'User account created. Default password is "password".',
+    'user_created' => 'User account created.',
     'user_deleted' => 'User account permanently deleted.',
     'updated' => 'Account access updated.',
     'division_create_failed' => 'Unable to create division. Check the name and assigned chief.',
     'role_updated' => 'Account role updated.',
     'password_updated' => 'Account password updated.',
+    'password_reset_to_default' => 'Account password reset to the default password.',
     'password_too_short' => 'New password must be at least 8 characters.',
     'account_disabled' => 'Your account is currently disabled. Please contact an administrator.',
     'password_mismatch' => 'New password confirmation does not match.',
@@ -145,7 +151,8 @@ function ui_message(string $raw): string {
 function meta_key_label(string $key): string {
   $k = strtolower(trim($key));
   $map = [
-    'user_id' => 'User ID',
+    'user_id' => 'User',
+    'deleted_user_id' => 'User',
     'doc_id' => 'Document ID',
     'document_id' => 'Document ID',
     'status' => 'Status',
@@ -164,10 +171,23 @@ function meta_key_label(string $key): string {
 }
 
 function meta_value_label(string $value): string {
+  return meta_value_label_for_key('', $value);
+}
+
+function meta_value_label_for_key(string $key, string $value): string {
   $v = trim($value);
   if ($v === '') {
     return '-';
   }
+
+  $normalizedKey = strtolower(trim($key));
+  if (in_array($normalizedKey, ['user_id', 'deleted_user_id', 'created_by', 'reviewed_by', 'routed_by', 'chief_user_id', 'assigned_reviewer_id'], true)) {
+    $displayCode = meta_user_display_code($v);
+    if ($displayCode !== null) {
+      return $displayCode;
+    }
+  }
+
   $upper = strtoupper($v);
   if ($upper === 'ACTIVE') {
     return 'Active';
@@ -175,16 +195,80 @@ function meta_value_label(string $value): string {
   if ($upper === 'DISABLED') {
     return 'Disabled';
   }
-  if ($upper === 'ADMIN') {
-    return 'Admin';
+  if ($upper === 'SUPER_ADMIN' || $upper === 'ADMIN') {
+    return 'Super Admin';
   }
-  if ($upper === 'DIVISION_CHIEF') {
-    return 'Section Chief';
+  if ($upper === 'SECTION_ADMIN' || $upper === 'DIVISION_CHIEF') {
+    return 'Section Admin';
   }
-  if ($upper === 'EMPLOYEE' || $upper === 'USER') {
-    return 'Employee';
+  if ($upper === 'BUSY') {
+    return 'Busy';
+  }
+  if ($upper === 'ON_LEAVE') {
+    return 'On leave';
+  }
+  if ($upper === 'SECTION_STAFF' || $upper === 'EMPLOYEE' || $upper === 'USER') {
+    return 'Section Staff';
   }
   return $v;
+}
+
+function meta_user_display_code(string $value): ?string {
+  static $cache = [];
+
+  $trimmed = trim($value);
+  if ($trimmed === '' || !ctype_digit($trimmed)) {
+    return null;
+  }
+
+  $userId = (int)$trimmed;
+  if ($userId <= 0) {
+    return null;
+  }
+
+  if (array_key_exists($userId, $cache)) {
+    return $cache[$userId];
+  }
+
+  if (!class_exists('User')) {
+    $userModelPath = __DIR__ . '/../models/User.php';
+    if (is_file($userModelPath)) {
+      require_once $userModelPath;
+    }
+  }
+
+  global $pdo;
+  if (!isset($pdo) || !($pdo instanceof PDO) || !class_exists('User')) {
+    return $cache[$userId] = 'USR-' . str_pad((string)$userId, 3, '0', STR_PAD_LEFT);
+  }
+
+  $user = User::withDisplayCode($pdo, User::findById($pdo, $userId));
+  if (!$user) {
+    return $cache[$userId] = 'USR-' . str_pad((string)$userId, 3, '0', STR_PAD_LEFT);
+  }
+
+  $displayCode = trim((string)($user['display_code'] ?? ''));
+  return $cache[$userId] = ($displayCode !== '' ? $displayCode : 'USR-' . str_pad((string)$userId, 3, '0', STR_PAD_LEFT));
+}
+
+function availability_label(?string $status): string {
+  $upper = strtoupper(trim((string)$status));
+  return match ($upper) {
+    'ACTIVE' => 'Available',
+    'BUSY' => 'Busy',
+    'ON_LEAVE' => 'On leave',
+    default => 'Available',
+  };
+}
+
+function availability_badge_class(?string $status): string {
+  $upper = strtoupper(trim((string)$status));
+  return match ($upper) {
+    'ACTIVE' => 'is-success',
+    'BUSY' => 'is-warning',
+    'ON_LEAVE' => 'is-danger',
+    default => 'is-neutral',
+  };
 }
 
 function role_label(string $role): string {
@@ -193,14 +277,14 @@ function role_label(string $role): string {
     return '-';
   }
   $upper = strtoupper($v);
-  if ($upper === 'ADMIN') {
-    return 'Admin';
+  if ($upper === 'SUPER_ADMIN' || $upper === 'ADMIN') {
+    return 'CDD Super Admin';
   }
-  if ($upper === 'DIVISION_CHIEF') {
-    return 'Section Chief';
+  if ($upper === 'SECTION_ADMIN' || $upper === 'DIVISION_CHIEF') {
+    return 'Section Admin';
   }
-  if ($upper === 'EMPLOYEE' || $upper === 'USER') {
-    return 'Employee';
+  if ($upper === 'SECTION_STAFF' || $upper === 'EMPLOYEE' || $upper === 'USER') {
+    return 'Section Staff';
   }
   if ($upper === 'PRIVATE') {
     return 'Private';
@@ -227,7 +311,7 @@ function parse_meta_details(?string $meta): array {
       [$key, $value] = array_pad(explode('=', $part, 2), 2, '');
       $items[] = [
         'label' => meta_key_label((string)$key),
-        'value' => meta_value_label((string)$value),
+        'value' => meta_value_label_for_key((string)$key, (string)$value),
       ];
       continue;
     }
@@ -261,10 +345,14 @@ function avatar_photo_url(array $user): ?string {
   if (preg_match('#^https?://#i', $photo)) {
     return $photo;
   }
+  // If photo already contains /media/file (from publicMediaUrl), don't double-wrap it
+  if (str_contains($photo, '/media/file')) {
+    return $photo;
+  }
   if (!str_starts_with($photo, '/')) {
     $photo = '/' . $photo;
   }
-  return wdms_base_url_path($photo);
+  return cddfts_base_url_path($photo);
 }
 
 function avatar_preset_key(array $user): string {

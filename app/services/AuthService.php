@@ -9,6 +9,10 @@ class AuthService {
     if (($u['status'] ?? 'ACTIVE') !== 'ACTIVE') return false;
 
     if (password_verify($password, $u['password'])) {
+      if (User::passwordNeedsRehash((string)$u['password'])) {
+        User::updatePassword($pdo, (int)$u['id'], User::hashPassword($password));
+        $u = User::findById($pdo, (int)$u['id']) ?? $u;
+      }
       if (session_status() === PHP_SESSION_ACTIVE) {
         session_regenerate_id(true);
       }

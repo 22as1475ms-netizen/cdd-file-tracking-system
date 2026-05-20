@@ -12,6 +12,29 @@ class Folder {
     return $s->fetchAll();
   }
 
+  public static function searchForUser(PDO $pdo, int $userId, string $search, string $storageArea = 'PRIVATE', int $limit = 8): array {
+    $term = trim($search);
+    if ($term === '') {
+      return [];
+    }
+
+    $limit = max(1, $limit);
+    $like = '%' . $term . '%';
+    $prefixLike = $term . '%';
+    $s = $pdo->prepare("
+      SELECT *
+      FROM folders
+      WHERE owner_id = ? AND storage_area = ? AND deleted_at IS NULL AND name LIKE ?
+      ORDER BY
+        CASE WHEN name LIKE ? THEN 0 ELSE 1 END,
+        LENGTH(name) ASC,
+        name ASC
+      LIMIT {$limit}
+    ");
+    $s->execute([$userId, self::normalizeStorageArea($storageArea), $like, $prefixLike]);
+    return $s->fetchAll();
+  }
+
   public static function findByNameForUser(PDO $pdo, int $userId, string $name, string $storageArea = 'PRIVATE'): ?array {
     $s = $pdo->prepare("SELECT * FROM folders WHERE owner_id=? AND name=? AND storage_area=? AND deleted_at IS NULL LIMIT 1");
     $s->execute([$userId, $name, self::normalizeStorageArea($storageArea)]);

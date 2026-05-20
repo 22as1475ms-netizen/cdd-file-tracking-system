@@ -5,39 +5,24 @@
 <div class="app-auth-shell">
   <section class="auth-panel">
     <div class="auth-panel__brand">
-      <img class="auth-panel__logo" src="<?= BASE_URL ?>/assets/images/logo.png" alt="WDMS logo">
-      <span class="auth-panel__eyebrow">Web-Based Document Management System</span>
+      <img class="auth-panel__logo" src="<?= BASE_URL ?>/assets/images/logo.png" alt="CDD-File-Tracking-System logo">
+      <span class="auth-panel__eyebrow">CDD-File-Tracking-System</span>
     </div>
-    <h1 class="auth-panel__title">WDMS document workflow hub.</h1>
+    <h1 class="auth-panel__title">Sign in to the workflow workspace.</h1>
     <p class="auth-panel__copy">
-      Sign in to access assigned records, organize folders and files, upload revised versions,
-      and continue document actions based on your role.
+      Route documents, review submissions, and manage accounts from one secure workspace.
+      If you are still using the default password, the system will ask you to change it before continuing.
     </p>
-
-    <div class="auth-grid">
-      <div class="auth-grid__card">
-        <strong>Assigned document access</strong>
-        <span>Open the folders and files available to your account and continue work from one secure workspace.</span>
-      </div>
-      <div class="auth-grid__card">
-        <strong>Revision workflow</strong>
-        <span>Download documents, edit them in desktop tools, then upload updated versions with tracked history.</span>
-      </div>
-      <div class="auth-grid__card">
-        <strong>Role-based control</strong>
-        <span>Users, reviewers, and administrators each continue the actions allowed in the current system flow.</span>
-      </div>
-    </div>
   </section>
 
   <section class="auth-card">
     <div class="auth-card__brand">
-      <img class="auth-card__logo" src="<?= BASE_URL ?>/assets/images/logo.png" alt="WDMS logo">
-      <div class="section-eyebrow">System Access</div>
+      <img class="auth-card__logo" src="<?= BASE_URL ?>/assets/images/logo.png" alt="CDD-File-Tracking-System logo">
+      <div class="section-eyebrow">Workspace Access</div>
     </div>
-    <h2 class="auth-card__title">Sign in to continue your document tasks</h2>
+    <h2 class="auth-card__title">Use your registered email and password</h2>
 
-    <?php if(!empty($error)): ?>
+    <?php if (!empty($error)): ?>
       <div class="alert alert-danger"><?= e($error) ?></div>
     <?php endif; ?>
 
@@ -45,7 +30,7 @@
       <?= csrf_field() ?>
       <label class="auth-form__label">
         <span>Work email</span>
-        <input class="form-control" name="email" placeholder="Enter your registered email" required>
+        <input class="form-control" name="email" placeholder="username@cdd.com" required>
       </label>
 
       <label class="auth-form__label">
@@ -55,7 +40,7 @@
             type="password"
             class="form-control auth-password-field__input"
             name="password"
-            placeholder="Enter your password"
+            placeholder="password"
             required
             data-password-input
           >
@@ -71,8 +56,13 @@
         </span>
       </label>
 
-      <button class="btn btn-primary">Sign in to WDMS</button>
+      <button class="btn btn-primary">Sign in to CDD-File-Tracking-System</button>
     </form>
+
+    <div class="auth-hint mt-3">
+      <strong>Forgotten password?</strong>
+      <span>Ask an administrator to reset your account back to the default password, then change it after sign-in.</span>
+    </div>
   </section>
 </div>
 

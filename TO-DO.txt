@@ -1,0 +1,58 @@
+CDD-File-Tracking-System Release Readiness Checklist
+
+[x] Routed workflow rules documented and aligned with current behavior
+[x] Notification feed infrastructure in place
+[x] Routed file share notification implemented
+[x] Route completed notification implemented
+[x] Review approval/rejection notifications implemented
+[x] Completed-route visibility and recipient retention covered by tests
+[x] Super Admin / Section Admin / Section Staff role normalization implemented
+[x] Retired messaging/chat files cleaned up
+[x] Expanded workflow regression coverage added
+
+[~] Route/status handling partly centralized, but raw status strings still exist in multiple files
+[~] Admin workspace aggregation improved, but may still need performance hardening
+[~] Permission/workflow policy partly centralized in AccessService, but checks still exist in controllers/views
+[~] Migration structure improving, but schema evolution still relies partly on runtime bootstrap
+[~] Storage-related code updated, but the planned storage upgrade is not complete
+
+[ ] Account created under your section notification
+[ ] Section assignment changed notification
+[ ] Full object storage / S3-style storage upgrade
+[ ] Dead-code cleanup phase 2 review for unfinished organization management files
+[ ] Routed-file clarification comments, if still part of scope
+
+Priority split
+
+Must finish before demo
+- Confirm the routed-document workflow works end to end for Super Admin, Section Admin, and Section Staff
+- Confirm the current notification feed correctly shows routed file share and route completion events
+- Verify the dashboard and routed workspace views show active and completed routes correctly
+- Run and fix the focused workflow tests needed to support the demo story
+- Decide whether clarification comments are part of the demo; if yes, implement them before demo
+
+Must finish before production
+- Account created under your section notification
+- Section assignment changed notification
+- Stronger route/status centralization to reduce workflow drift and typo bugs
+- Stronger permission/workflow policy centralization so role rules stay consistent
+- Admin workspace performance hardening for larger user/document counts
+- Cleaner migration structure for safer upgrades and deployment predictability
+- Storage upgrade if the expected production load makes local/database-backed storage risky
+- Dead-code cleanup phase 2 for abandoned organization-management leftovers if not part of final scope
+
+Can wait
+- Full object storage / S3-style storage upgrade if production scale is still small and current storage is stable
+- Routed-file clarification comments if the workflow can proceed without in-app discussion
+- Additional refactors that improve maintainability but do not change the current working behavior
+
+Admin scope
+- File uploads and routing to allowed accounts
+- Account management: create accounts and sections, update roles and sections, delete accounts
+- Add users per section
+- Audit trails and logs, with report presentation handled later if needed
+- Routing view of files, including in-system PDF viewing
+
+User scope
+- Viewing of routed files
+- Clarification comments if retained in final scope

@@ -1,9 +1,9 @@
 <?php
-$ROOT = dirname(__DIR__); // C:\xampp\htdocs\wdms
+$ROOT = dirname(__DIR__); // Project root
 
 require $ROOT . "/app/config/app.php";
 require $ROOT . "/app/config/database.php";
-wdms_bootstrap_session();
+cddfts_bootstrap_session();
 
 ini_set('display_errors', APP_DEBUG ? '1' : '0');
 ini_set('display_startup_errors', APP_DEBUG ? '1' : '0');
@@ -14,13 +14,13 @@ require $ROOT . "/app/helpers/redirect.php";
 require $ROOT . "/app/helpers/csrf.php";
 require $ROOT . "/app/helpers/http.php";
 
-function wdms_log_throwable(Throwable $throwable): void {
-  error_log('[WDMS] ' . get_class($throwable) . ': ' . $throwable->getMessage());
-  error_log('[WDMS] in ' . $throwable->getFile() . ':' . $throwable->getLine());
-  error_log('[WDMS] trace: ' . $throwable->getTraceAsString());
+function cddfts_log_throwable(Throwable $throwable): void {
+  error_log('[CDD-File-Tracking-System] ' . get_class($throwable) . ': ' . $throwable->getMessage());
+  error_log('[CDD-File-Tracking-System] in ' . $throwable->getFile() . ':' . $throwable->getLine());
+  error_log('[CDD-File-Tracking-System] trace: ' . $throwable->getTraceAsString());
 }
 
-function wdms_render_fatal_response(string $message, int $status = 500): void {
+function cddfts_render_fatal_response(string $message, int $status = 500): void {
   if (!headers_sent()) {
     http_response_code($status);
     header('Content-Type: text/plain; charset=utf-8');
@@ -35,8 +35,8 @@ function wdms_render_fatal_response(string $message, int $status = 500): void {
 }
 
 set_exception_handler(static function (Throwable $throwable): void {
-  wdms_log_throwable($throwable);
-  wdms_render_fatal_response($throwable->getMessage(), 500);
+  cddfts_log_throwable($throwable);
+  cddfts_render_fatal_response($throwable->getMessage(), 500);
 });
 
 set_error_handler(static function (int $severity, string $message, string $file, int $line): bool {
@@ -59,63 +59,44 @@ register_shutdown_function(static function (): void {
   }
 
   $message = sprintf('%s in %s:%d', (string)$error['message'], (string)$error['file'], (int)$error['line']);
-  error_log('[WDMS] shutdown fatal: ' . $message);
-  wdms_render_fatal_response($message, 500);
+  error_log('[CDD-File-Tracking-System] shutdown fatal: ' . $message);
+  cddfts_render_fatal_response($message, 500);
 });
 
-function wdms_normalized_request_path(): string {
+function cddfts_normalized_request_path(): string {
   $path = (string)parse_url((string)($_SERVER['REQUEST_URI'] ?? '/'), PHP_URL_PATH);
   if (BASE_URL !== '' && str_starts_with($path, BASE_URL)) {
     $path = substr($path, strlen(BASE_URL));
   }
+  if ($path !== '/') {
+    $path = rtrim($path, '/');
+  }
   return $path === '' ? '/' : $path;
 }
 
-function wdms_web_routes(): array {
+function cddfts_web_routes(): array {
   return [
     '/' => ['controller' => 'AuthController.php', 'handler' => 'login'],
     '/login' => ['controller' => 'AuthController.php', 'handler' => 'login'],
     '/notifications/read' => ['middleware' => ['require_login.php'], 'controller' => 'NotificationController.php', 'handler' => 'notifications_mark_read'],
     '/notifications/clear' => ['middleware' => ['require_login.php'], 'controller' => 'NotificationController.php', 'handler' => 'notifications_clear_all'],
-    '/dashboard' => ['middleware' => ['require_login.php'], 'handler' => 'wdms_dashboard_redirect'],
+    '/dashboard' => ['middleware' => ['require_login.php'], 'controller' => 'DashboardController.php', 'handler' => 'user_dashboard'],
     '/account/password' => ['middleware' => ['require_login.php'], 'controller' => 'AccountController.php', 'handler' => 'account_password'],
     '/account/onboarding/complete' => ['middleware' => ['require_login.php'], 'controller' => 'AccountController.php', 'handler' => 'account_complete_onboarding'],
     '/media/file' => ['middleware' => ['require_login.php'], 'controller' => 'MediaController.php', 'handler' => 'serve_media_file'],
-    '/documents' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'documents'],
+    '/documents' => ['middleware' => ['require_login.php'], 'handler' => 'cddfts_documents_redirect'],
     '/documents/upload' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'upload'],
-    '/documents/create' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'create_document'],
     '/documents/view' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'view_doc'],
-    '/documents/replace' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'replace_file'],
     '/documents/download' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'download_doc'],
     '/documents/file' => ['controller' => 'DocumentController.php', 'handler' => 'serve_doc_file'],
-    '/documents/version/upload' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'upload_version'],
-    '/documents/checkout' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'checkout_doc'],
-    '/documents/checkin' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'checkin_doc'],
-    '/documents/metadata' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'update_metadata'],
-    '/documents/route' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'route_document'],
-    '/documents/message/send' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'send_document_message'],
-    '/documents/review/decision' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'review_document_decision'],
-    '/documents/review/accept' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'accept_review_assignment'],
-    '/documents/review/decline' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'decline_review_assignment'],
-    '/documents/submit' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'submit_document_for_review'],
-    '/documents/bulk' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'bulk_action'],
     '/documents/delete' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'soft_delete'],
-    '/documents/move-to-official' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'move_doc_to_official'],
-    '/documents/move-to-private' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'move_doc_to_private'],
-    '/documents/manage-selected' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'manage_selected_documents'],
-    '/documents/restore' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'restore_doc'],
-    '/folders/restore' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'restore_folder'],
-    '/documents/trash/empty' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'empty_trash'],
-    '/documents/trash/delete-selected' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'delete_selected_trash'],
     '/documents/share' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'share_doc'],
     '/documents/share/respond' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'respond_to_share'],
-    '/documents/revoke' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'revoke_share'],
-    '/folders/create' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'create_folder'],
-    '/folders/delete' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'delete_folder'],
-    '/folders/move-to-official' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'move_folder_to_official'],
-    '/folders/move-to-private' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'move_folder_to_private'],
-    '/folders/rename' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'rename_folder'],
-    '/folders/share' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'share_folder'],
+    '/documents/share/revoke' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'revoke_share'],
+    '/documents/share/folder' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'share_folder'],
+    '/admin/documents/delete' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'admin_delete_document'],
+    '/documents/route' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'route_document'],
+    '/documents/route/complete' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'complete_route_lifecycle'],
     '/admin/users' => ['middleware' => ['require_login.php'], 'controller' => 'AdminController.php', 'handler' => 'admin_users'],
     '/admin/users/export' => ['middleware' => ['require_login.php'], 'controller' => 'AdminController.php', 'handler' => 'admin_export_users'],
     '/admin/users/toggle' => ['middleware' => ['require_login.php'], 'controller' => 'AdminController.php', 'handler' => 'admin_toggle_user'],
@@ -124,12 +105,18 @@ function wdms_web_routes(): array {
     '/admin/users/delete' => ['middleware' => ['require_login.php'], 'controller' => 'AdminController.php', 'handler' => 'admin_delete_user'],
     '/admin/users/role' => ['middleware' => ['require_login.php'], 'controller' => 'AdminController.php', 'handler' => 'admin_change_role'],
     '/admin/users/password' => ['middleware' => ['require_login.php'], 'controller' => 'AdminController.php', 'handler' => 'admin_change_user_password'],
+    '/admin/users/password/reveal' => ['middleware' => ['require_login.php'], 'controller' => 'AdminController.php', 'handler' => 'admin_reveal_user_password'],
+    '/admin/users/password/default' => ['middleware' => ['require_login.php'], 'controller' => 'AdminController.php', 'handler' => 'admin_reset_user_password'],
     '/admin/logs' => ['middleware' => ['require_login.php'], 'controller' => 'AdminController.php', 'handler' => 'admin_logs'],
     '/admin/logs/export' => ['middleware' => ['require_login.php'], 'controller' => 'AdminController.php', 'handler' => 'admin_export_logs'],
+    '/admin/routed' => ['middleware' => ['require_login.php'], 'controller' => 'AdminController.php', 'handler' => 'admin_routed_report'],
+    '/admin/dashboard' => ['middleware' => ['require_login.php'], 'controller' => 'AdminController.php', 'handler' => 'admin_dashboard'],
+    '/admin/routed/export' => ['middleware' => ['require_login.php'], 'controller' => 'AdminController.php', 'handler' => 'admin_export_routed'],
+    // Organization chart removed — admin organization management is available under /admin/users
   ];
 }
 
-function wdms_require_route_files(string $root, array $route): void {
+function cddfts_require_route_files(string $root, array $route): void {
   foreach ($route['middleware'] ?? [] as $middleware) {
     require $root . "/app/middleware/" . $middleware;
   }
@@ -139,11 +126,20 @@ function wdms_require_route_files(string $root, array $route): void {
   }
 }
 
-function wdms_dashboard_redirect(): void {
+function cddfts_dashboard_redirect(): void {
   redirect(workspace_home_path());
 }
 
-function wdms_logout(): void {
+function cddfts_documents_redirect(): void {
+  // Redirect legacy workspace view to admin dashboard
+  $role = strtoupper((string)($_SESSION['user']['role'] ?? ''));
+  if (in_array($role, ['SUPER_ADMIN', 'ADMIN', 'SECTION_ADMIN'], true)) {
+    redirect('/admin/dashboard');
+  }
+  redirect('/dashboard');
+}
+
+function cddfts_logout(): void {
   global $pdo;
 
   if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
@@ -159,19 +155,19 @@ function wdms_logout(): void {
   redirect('/login');
 }
 
-function wdms_dispatch_web_route(string $root, string $path): bool {
+function cddfts_dispatch_web_route(string $root, string $path): bool {
   if ($path === '/logout') {
-    wdms_logout();
+    cddfts_logout();
     return true;
   }
 
-  $routes = wdms_web_routes();
+  $routes = cddfts_web_routes();
   if (!isset($routes[$path])) {
     return false;
   }
 
   $route = $routes[$path];
-  wdms_require_route_files($root, $route);
+  cddfts_require_route_files($root, $route);
 
   $handler = $route['handler'] ?? '';
   if ($handler === '' || !function_exists($handler)) {
@@ -182,7 +178,7 @@ function wdms_dispatch_web_route(string $root, string $path): bool {
   return true;
 }
 
-$path = wdms_normalized_request_path();
+$path = cddfts_normalized_request_path();
 
 if (str_starts_with($path, '/api/')) {
   require $ROOT . "/app/controllers/ApiController.php";
@@ -190,7 +186,7 @@ if (str_starts_with($path, '/api/')) {
   exit;
 }
 
-if (!wdms_dispatch_web_route($ROOT, $path)) {
+if (!cddfts_dispatch_web_route($ROOT, $path)) {
   http_response_code(404);
   echo "404 Not Found";
 }

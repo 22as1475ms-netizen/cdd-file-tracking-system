@@ -1,6 +1,7 @@
 <?php
 require_once __DIR__ . "/../helpers/csrf.php";
 require_once __DIR__ . "/../helpers/http.php";
+require_once __DIR__ . "/../helpers/redirect.php";
 require_once __DIR__ . "/../models/Division.php";
 require_once __DIR__ . "/../models/Folder.php";
 require_once __DIR__ . "/../models/Document.php";
@@ -11,7 +12,6 @@ require_once __DIR__ . "/../models/Permission.php";
 require_once __DIR__ . "/../models/User.php";
 require_once __DIR__ . "/../models/AuditLog.php";
 require_once __DIR__ . "/../models/Notification.php";
-require_once __DIR__ . "/../models/DocumentMessage.php";
 require_once __DIR__ . "/../models/Organization.php";
 require_once __DIR__ . "/../services/DocumentService.php";
 require_once __DIR__ . "/../services/DocumentShareService.php";
@@ -26,6 +26,33 @@ function current_role(): string {
 
 function document_tracking_date_default(): string {
   return date('Y-m-d');
+}
+
+function document_tracking_normalize_date(string $value): string {
+  $value = trim($value);
+  if ($value === '') {
+    return '';
+  }
+
+  if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $value)) {
+    return $value;
+  }
+
+  if (preg_match('/^(?<month>\d{1,2})\/(?<day>\d{1,2})\/(?<year>\d{2}|\d{4})$/', $value, $matches)) {
+    $month = (int)$matches['month'];
+    $day = (int)$matches['day'];
+    $year = (int)$matches['year'];
+
+    if (strlen((string)$matches['year']) === 2) {
+      $year += $year >= 70 ? 1900 : 2000;
+    }
+
+    if (checkdate($month, $day, $year)) {
+      return sprintf('%04d-%02d-%02d', $year, $month, $day);
+    }
+  }
+
+  return '';
 }
 
 function document_tracking_location_default(string $storageArea): string {
@@ -46,6 +73,7 @@ function document_tracking_payload(array $input, string $filename, string $stora
   $rawCategory = trim((string)($input['category'] ?? ''));
   $rawSignatory = trim((string)($input['signatory'] ?? ''));
   $rawDate = trim((string)($input['document_date'] ?? ''));
+  $resolvedCategory = $rawCategory !== '' ? $rawCategory : 'Incoming PDF';
 
   return [
     'document_code' => $rawCode !== '' ? mb_substr($rawCode, 0, 80) : '',
@@ -54,11 +82,9 @@ function document_tracking_payload(array $input, string $filename, string $stora
     'signatory' => $rawSignatory !== '' ? mb_substr($rawSignatory, 0, 150) : '',
     'current_location' => mb_substr($rawLocation !== '' ? $rawLocation : document_tracking_location_default($storageArea), 0, 180),
     'routing_status' => 'NOT_ROUTED',
-    'priority_level' => Document::normalizePriorityLevel((string)($input['priority_level'] ?? 'NORMAL')),
-    'document_date' => preg_match('/^\d{4}-\d{2}-\d{2}$/', $rawDate)
-      ? $rawDate
-      : '',
-    'category' => $rawCategory !== '' ? mb_substr($rawCategory, 0, 100) : '',
+    'priority_level' => Document::normalizePriorityLevel((string)($input['priority_level'] ?? 'MODERATE')),
+    'document_date' => document_tracking_normalize_date($rawDate),
+    'category' => mb_substr($resolvedCategory, 0, 100),
     'tags' => mb_substr(trim((string)($input['tags'] ?? '')), 0, 255),
     'status' => mb_substr(trim((string)($input['status'] ?? 'Draft')), 0, 20),
     'retention_until' => preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)($input['retention_until'] ?? ''))
@@ -85,9 +111,6 @@ function document_tracking_apply_batch_rules(array $tracking, int $entryIndex, i
 }
 
 function document_tracking_required_error(array $tracking): ?string {
-  if (trim((string)($tracking['document_code'] ?? '')) === '') {
-    return 'document_code_required';
-  }
   if (trim((string)($tracking['title'] ?? '')) === '') {
     return 'document_title_required';
   }
@@ -96,9 +119,6 @@ function document_tracking_required_error(array $tracking): ?string {
   }
   if (trim((string)($tracking['document_date'] ?? '')) === '') {
     return 'document_date_required';
-  }
-  if (trim((string)($tracking['category'] ?? '')) === '') {
-    return 'category_required';
   }
   return null;
 }
@@ -144,11 +164,15 @@ function document_share_route_note(array $target, ?array $division = null): stri
     $parts[] = 'with division chief ' . $chiefName;
   }
 
-  return implode(' ', $parts) . ' and is waiting for acceptance.';
+  return implode(' ', $parts) . ' and is now active in the routed workflow.';
 }
 
 function is_admin_user(): bool {
-  return current_role() === 'ADMIN';
+  return in_array(current_role(), ['SUPER_ADMIN', 'ADMIN'], true);
+}
+
+function is_super_admin_user(): bool {
+  return current_role() === 'SUPER_ADMIN';
 }
 
 function is_division_chief_user(): bool {
@@ -169,7 +193,10 @@ function selected_owner_id(PDO $pdo, int $sessionUserId): int {
 }
 
 function request_document_id(): int {
-  $docId = req_int('id', req_int('document_id', 0));
+  $docId = (int)($_POST['id'] ?? $_POST['document_id'] ?? 0);
+  if ($docId <= 0) {
+    $docId = req_int('id', req_int('document_id', 0));
+  }
   if ($docId > 0) {
     return $docId;
   }
@@ -192,6 +219,87 @@ function request_folder_id(): int {
   return 0;
 }
 
+function complete_route_redirect_path(PDO $pdo, int $docId, int $userId, int $ownerId): string {
+  $level = AccessService::level($pdo, $docId, $userId);
+  if (in_array($level, ['admin', 'owner', 'editor', 'viewer', 'division_chief'], true)) {
+    return '/documents/view?id=' . $docId . '&msg=route_lifecycle_completed&user_id=' . $ownerId;
+  }
+
+  return workspace_home_path() . '?msg=route_lifecycle_completed';
+}
+
+function document_route_recipients(PDO $pdo, array $doc, int $userId): array {
+  if (is_admin_user()) {
+    return array_values(array_filter(
+      User::listShareRecipients($pdo, $userId, (int)($doc['division_id'] ?? 0)),
+      static function (array $recipient): bool {
+        return strtoupper((string)($recipient['role'] ?? '')) === 'SECTION_ADMIN'
+          && strtoupper((string)($recipient['status'] ?? 'ACTIVE')) === 'ACTIVE';
+      }
+    ));
+  }
+
+  if (current_role() === 'SECTION_ADMIN') {
+    $recipientDivisionId = (int)($doc['division_id'] ?? 0);
+    if ($recipientDivisionId <= 0) {
+      $recipientDivisionId = (int)($_SESSION['user']['division_id'] ?? 0);
+    }
+    return array_values(array_filter(
+      User::listEmployeesByDivision($pdo, $recipientDivisionId),
+      static function (array $recipient) use ($userId): bool {
+        return (int)($recipient['id'] ?? 0) !== $userId
+          && strtoupper((string)($recipient['status'] ?? 'ACTIVE')) === 'ACTIVE';
+      }
+    ));
+  }
+
+  $memberships = TeamMember::findByUser($pdo, $userId);
+  if (empty($memberships)) {
+    return User::listShareRecipients($pdo, $userId, (int)($doc['division_id'] ?? 0));
+  }
+
+  $sectionId = (int)($memberships[0]['section_id'] ?? 0);
+  if ($sectionId <= 0) {
+    return User::listShareRecipients($pdo, $userId, (int)($doc['division_id'] ?? 0));
+  }
+
+  $sectionMembers = TeamMember::findBySection($pdo, $sectionId);
+  $recipients = [];
+  foreach ($sectionMembers as $member) {
+    $memberUserId = (int)($member['user_id'] ?? 0);
+    if ($memberUserId <= 0 || $memberUserId === $userId) {
+      continue;
+    }
+    if (strtoupper((string)($member['status'] ?? 'ACTIVE')) !== 'ACTIVE') {
+      continue;
+    }
+    if (strtoupper((string)($member['role'] ?? 'MEMBER')) === 'SECTION_CHIEF') {
+      $userRole = 'SECTION_ADMIN';
+    } else {
+      $userRole = 'EMPLOYEE';
+    }
+    $recipients[] = [
+      'id' => $memberUserId,
+      'name' => (string)($member['name'] ?? ''),
+      'email' => (string)($member['email'] ?? ''),
+      'role' => $userRole,
+      'status' => (string)($member['status'] ?? 'ACTIVE'),
+      'availability_status' => (string)($member['availability_status'] ?? 'ACTIVE'),
+      'availability_note' => (string)($member['availability_note'] ?? ''),
+      'division_id' => (int)($doc['division_id'] ?? 0),
+      'created_at' => '',
+      'avatar_photo' => null,
+      'avatar_preset' => null,
+      'division_name' => (string)($doc['division_name'] ?? 'No division'),
+      'chief_user_id' => 0,
+      'chief_name' => (string)($memberships[0]['section_name'] ?? 'Section'),
+      'chief_email' => '',
+    ];
+  }
+
+  return $recipients;
+}
+
 function can_manage_document(array $doc, int $uid): bool {
   return is_admin_user() || (int)$doc['owner_id'] === $uid;
 }
@@ -205,7 +313,7 @@ function document_share_locked_for_user(array $doc, int $uid): bool {
   $level = AccessService::level($GLOBALS['pdo'], (int)($doc['id'] ?? 0), $uid);
   $routingStatus = strtoupper((string)($doc['routing_status'] ?? 'AVAILABLE'));
   $routeOutcome = strtoupper((string)($doc['route_outcome'] ?? 'ACTIVE'));
-  if ($routeOutcome !== 'ACTIVE' || in_array($routingStatus, ['APPROVED', 'REJECTED'], true)) {
+  if ($routeOutcome !== 'ACTIVE' || in_array($routingStatus, ['APPROVED', 'REJECTED', 'COMPLETED'], true)) {
     return true;
   }
 
@@ -220,7 +328,7 @@ function document_share_locked_for_user(array $doc, int $uid): bool {
 function document_is_finalized(array $doc): bool {
   $routeOutcome = strtoupper((string)($doc['route_outcome'] ?? 'ACTIVE'));
   $routingStatus = strtoupper((string)($doc['routing_status'] ?? 'AVAILABLE'));
-  return $routeOutcome !== 'ACTIVE' || in_array($routingStatus, ['APPROVED', 'REJECTED'], true);
+  return $routeOutcome !== 'ACTIVE' || in_array($routingStatus, ['APPROVED', 'REJECTED', 'COMPLETED'], true);
 }
 
 function can_mutate_document(array $doc, int $uid): bool {
@@ -237,7 +345,7 @@ function can_mutate_document(array $doc, int $uid): bool {
 }
 
 function document_admin_reauth_ok(PDO $pdo, string $password): bool {
-  if ($password === '' || !is_admin_user()) {
+  if ($password === '' || !is_super_admin_user()) {
     return false;
   }
 
@@ -252,6 +360,21 @@ function document_admin_reauth_ok(PDO $pdo, string $password): bool {
   }
 
   return password_verify($password, (string)($admin['password'] ?? ''));
+}
+
+function permanently_delete_document(PDO $pdo, int $docId, int $actorId): bool {
+  $doc = Document::get($pdo, $docId);
+  if (!$doc) {
+    return false;
+  }
+
+  $deletedCount = purge_trash_items($pdo, (int)($doc['owner_id'] ?? 0), [], [$docId]);
+  if ($deletedCount < 1) {
+    return false;
+  }
+
+  AuditLog::add($pdo, $actorId, "Permanently deleted document", $docId, "owner_id=" . (int)($doc['owner_id'] ?? 0));
+  return true;
 }
 
 function can_submit_document_for_review(array $doc): bool {
@@ -641,11 +764,8 @@ function workspace_global_search(PDO $pdo, int $uid, int $targetUserId, string $
 
   $folderHits = [];
   foreach (['OFFICIAL'] as $storageArea) {
-    foreach (Folder::listForUser($pdo, $targetUserId, $storageArea) as $folder) {
+    foreach (Folder::searchForUser($pdo, $targetUserId, $query, $storageArea, 8) as $folder) {
       $displayName = Folder::basename((string)($folder['name'] ?? ''));
-      if (!workspace_search_matches($query, $displayName, (string)($folder['name'] ?? ''), $storageArea)) {
-        continue;
-      }
       $folderHits[] = [
         'title' => $displayName,
         'meta' => 'Routed folder',
@@ -660,19 +780,13 @@ function workspace_global_search(PDO $pdo, int $uid, int $targetUserId, string $
 
   $documentHits = [];
   foreach (['OFFICIAL'] as $storageArea) {
-    foreach (Document::listActiveForOwnerInStorage($pdo, $targetUserId, $storageArea) as $doc) {
+    foreach (Document::searchActiveForOwnerInStorage($pdo, $targetUserId, $storageArea, $query, 10) as $doc) {
       $name = (string)($doc['name'] ?? '');
       $title = (string)($doc['title'] ?? '');
       $documentCode = (string)($doc['document_code'] ?? '');
       $category = (string)($doc['category'] ?? '');
       $status = (string)($doc['status'] ?? '');
       $location = (string)($doc['current_location'] ?? '');
-      $signatory = (string)($doc['signatory'] ?? '');
-      $priority = (string)($doc['priority_level'] ?? '');
-      $direction = (string)($doc['document_type'] ?? '');
-      if (!workspace_search_matches($query, $name, $title, $documentCode, $category, $status, $location, $signatory, $priority, $direction, $storageArea)) {
-        continue;
-      }
       $documentHits[] = [
         'title' => $title !== '' ? $title : $name,
         'meta' => trim(($documentCode !== '' ? $documentCode . ' | ' : '') . ($location !== '' ? $location . ' | ' : '') . 'Routed' . ($status !== '' ? ' | ' . $status : '')),
@@ -1394,8 +1508,8 @@ function create_document(): void {
   if ($isJsonRequest) {
     $respondCreate(200, [
       'ok' => true,
-      'open_url' => wdms_base_url_path($openUrl),
-      'refresh_url' => wdms_base_url_path($refreshUrl),
+      'open_url' => cddfts_base_url_path($openUrl),
+      'refresh_url' => cddfts_base_url_path($refreshUrl),
     ]);
   }
 
@@ -1428,7 +1542,7 @@ function view_doc(): void {
     'level' => $level,
     'canViewFile' => $canViewFile,
     'shared' => $shared,
-    'shareRecipients' => User::listShareRecipients($pdo, $uid, (int)($doc['division_id'] ?? 0)),
+    'shareRecipients' => document_route_recipients($pdo, $doc, $uid),
     'latest' => $latest,
     'preview' => $preview,
     'reviews' => $reviews,
@@ -1588,26 +1702,27 @@ function soft_delete(): void {
   global $pdo;
   csrf_verify();
   $uid = (int)$_SESSION['user']['id'];
-  $docId = request_document_id();
-  $doc = Document::get($pdo, $docId);
-  if (!$doc) { redirect('/documents?err=not_found'); }
-  if (!can_mutate_document($doc, $uid)) {
-    if (can_manage_document($doc, $uid) && is_approval_locked($doc)) {
-      redirect('/documents/view?id='.$docId.'&err=approval_locked&user_id='.(int)$doc['owner_id']);
-    }
-    http_response_code(403); die("403 owner only");
+  if (!is_super_admin_user()) {
+    redirect('/admin/dashboard?err=permission_denied');
   }
 
-  Document::softDelete($pdo, $docId, $uid, req_str('reason', '') ?: null);
-  AuditLog::add($pdo, $uid, "Soft-deleted document", $docId, null);
-  redirect('/admin/dashboard?msg=deleted');
+  $docId = request_document_id();
+  try {
+    if (!permanently_delete_document($pdo, $docId, $uid)) {
+      redirect('/admin/dashboard?err=not_found');
+    }
+  } catch (Throwable $e) {
+    redirect('/admin/dashboard?err=trash_empty_failed');
+  }
+
+  redirect('/admin/dashboard?msg=file_deleted');
 }
 
 function admin_delete_document(): void {
   global $pdo;
   csrf_verify();
 
-  if (!is_admin_user()) {
+  if (!is_super_admin_user()) {
     http_response_code(403);
     die("403 Forbidden");
   }
@@ -1618,31 +1733,15 @@ function admin_delete_document(): void {
 
   $uid = (int)($_SESSION['user']['id'] ?? 0);
   $docId = request_document_id();
-  $doc = Document::get($pdo, $docId);
-  if (!$doc) {
-    redirect('/admin/dashboard?err=not_found');
-  }
-
   try {
-    $deletedCount = purge_trash_items($pdo, (int)($doc['owner_id'] ?? 0), [], [$docId]);
+    if (!permanently_delete_document($pdo, $docId, $uid)) {
+      redirect('/admin/dashboard?err=not_found');
+    }
   } catch (Throwable $e) {
     redirect('/admin/dashboard?err=trash_empty_failed');
   }
 
-  if ($deletedCount < 1) {
-    redirect('/admin/dashboard?err=not_found');
-  }
-
-  AuditLog::add($pdo, $uid, "Permanently deleted document", $docId, "owner_id=" . (int)($doc['owner_id'] ?? 0));
   redirect('/admin/dashboard?msg=file_deleted');
-}
-
-function move_doc_to_official(): void {
-  redirect('/admin/dashboard?msg=feature_retired');
-}
-
-function move_doc_to_private(): void {
-  redirect('/admin/dashboard?msg=feature_retired');
 }
 
 function manage_selected_documents(): void {
@@ -1812,16 +1911,6 @@ function delete_selected_trash(): void {
   redirect('/admin/dashboard?msg=trash_deleted');
 }
 
-function checkout_doc(): void {
-  $docId = req_int('id', 0);
-  redirect('/documents/view?id='.$docId.'&err=feature_retired');
-}
-
-function checkin_doc(): void {
-  $docId = req_int('id', 0);
-  redirect('/documents/view?id='.$docId.'&err=feature_retired');
-}
-
 function update_metadata(): void {
   global $pdo;
   csrf_verify();
@@ -1907,6 +1996,8 @@ function route_document(): void {
   Document::updateTrackingState($pdo, $docId, $nextLocation, $nextStatus);
   if ($nextStatus === 'APPROVED') {
     Document::closeRoute($pdo, $docId, 'APPROVED');
+  } elseif ($nextStatus === 'COMPLETED') {
+    Document::closeRoute($pdo, $docId, 'COMPLETED');
   } elseif (in_array($nextStatus, ['SHARE_DECLINED', 'REVIEW_ASSIGNMENT_DECLINED'], true)) {
     Document::closeRoute($pdo, $docId, 'RETURNED');
   } elseif ($nextStatus === 'REJECTED') {
@@ -1927,35 +2018,29 @@ function route_document(): void {
   redirect('/documents/view?id='.$docId.'&msg=route_saved&user_id='.(int)$doc['owner_id']);
 }
 
-function send_document_message(): void {
+function complete_route_lifecycle(): void {
   global $pdo;
   csrf_verify();
-  if (is_admin_user()) {
-    redirect('/documents?err=chat_unavailable');
-  }
 
-  $senderId = (int)($_SESSION['user']['id'] ?? 0);
-  $docId = req_int('id', 0);
-  $recipientEmail = req_str('recipient_email', '');
-  $message = req_str('message', '');
-
-  if ($message === '' || $recipientEmail === '') {
-    redirect('/documents/view?id='.$docId.'&err=message_invalid');
-  }
-
-  AccessService::requireView($pdo, $docId, $senderId);
+  $uid = (int)($_SESSION['user']['id'] ?? 0);
+  $docId = request_document_id();
   $doc = Document::get($pdo, $docId);
-  if (!$doc) { redirect('/documents?err=not_found'); }
-
-  $recipient = User::findByEmail($pdo, $recipientEmail);
-  if (!$recipient) {
-    redirect('/documents/view?id='.$docId.'&err=user_not_found&user_id='.(int)$doc['owner_id']);
+  if (!$doc) {
+    redirect('/documents?err=not_found');
   }
 
-  DocumentMessage::send($pdo, $docId, $senderId, (int)$recipient['id'], $message);
-  Notification::add($pdo, (int)$recipient['id'], "New message on document", "From ".($_SESSION['user']['email'] ?? 'user'), "/documents/view?id=".$docId);
-  AuditLog::add($pdo, $senderId, "Sent document message", $docId, "to=".$recipientEmail);
-  redirect('/documents/view?id='.$docId.'&msg=message_sent&user_id='.(int)$doc['owner_id']);
+  try {
+    DocumentShareService::completeRouteLifecycle($pdo, $doc, $uid, trim(req_str('completion_note', '')));
+  } catch (RuntimeException $e) {
+    $error = $e->getMessage();
+    if ($error === 'forbidden') {
+      http_response_code(403);
+      die("403 current holder only");
+    }
+    redirect('/documents/view?id=' . $docId . '&err=' . urlencode($error) . '&user_id=' . (int)$doc['owner_id']);
+  }
+
+  redirect(complete_route_redirect_path($pdo, $docId, $uid, (int)$doc['owner_id']));
 }
 
 function bulk_action(): void {

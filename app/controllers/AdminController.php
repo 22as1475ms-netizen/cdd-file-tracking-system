@@ -12,99 +12,427 @@ require_once __DIR__ . "/../models/Notification.php";
 require_once __DIR__ . "/../models/AuditLog.php";
 require_once __DIR__ . "/../services/DocumentService.php";
 
+function admin_actor_role(): string {
+  return strtoupper((string)($_SESSION['user']['role'] ?? ''));
+}
+
+function admin_is_section_admin(): bool {
+  return admin_actor_role() === 'SECTION_ADMIN';
+}
+
+function admin_scope_division_id(PDO $pdo): int {
+  $uid = (int)($_SESSION['user']['id'] ?? 0);
+  if ($uid <= 0) {
+    return 0;
+  }
+  $user = User::findById($pdo, $uid);
+  return (int)($user['division_id'] ?? 0);
+}
+
+function admin_scoped_users(PDO $pdo): array {
+  if (!admin_is_section_admin()) {
+    return User::attachDisplayCodes($pdo, User::allNonAdmins($pdo));
+  }
+
+  $divisionId = admin_scope_division_id($pdo);
+  if ($divisionId <= 0) {
+    return [];
+  }
+
+  return User::attachDisplayCodes($pdo, User::listEmployeesByDivision($pdo, $divisionId));
+}
+
+function admin_scoped_divisions(PDO $pdo): array {
+  if (!admin_is_section_admin()) {
+    return Division::all($pdo);
+  }
+
+  $divisionId = admin_scope_division_id($pdo);
+  if ($divisionId <= 0) {
+    return [];
+  }
+
+  $division = Division::find($pdo, $divisionId);
+  return $division ? [$division] : [];
+}
+
+function admin_notify_account_created_under_section(PDO $pdo, int $newUserId, ?int $divisionId): void {
+  $userId = (int)$newUserId;
+  $scopedDivisionId = (int)($divisionId ?? 0);
+  if ($userId <= 0 || $scopedDivisionId <= 0) {
+    return;
+  }
+
+  $division = Division::find($pdo, $scopedDivisionId);
+  $chiefUserId = (int)($division['chief_user_id'] ?? 0);
+  if ($chiefUserId <= 0 || $chiefUserId === $userId) {
+    return;
+  }
+
+  $createdUser = User::findById($pdo, $userId);
+  if (!$createdUser) {
+    return;
+  }
+
+  $divisionName = trim((string)($division['name'] ?? 'your section'));
+  Notification::add(
+    $pdo,
+    $chiefUserId,
+    'New account created in your section',
+    (string)($createdUser['name'] ?? 'A new account') . ' was added under ' . $divisionName . '.',
+    '/admin/users?user_id=' . $userId
+  );
+}
+
+function admin_notify_section_assignment_changed(PDO $pdo, array $targetBefore, array $targetAfter): void {
+  $userId = (int)($targetAfter['id'] ?? $targetBefore['id'] ?? 0);
+  if ($userId <= 0) {
+    return;
+  }
+
+  $beforeDivisionId = (int)($targetBefore['division_id'] ?? 0);
+  $afterDivisionId = (int)($targetAfter['division_id'] ?? 0);
+  if ($beforeDivisionId === $afterDivisionId) {
+    return;
+  }
+
+  $beforeDivision = $beforeDivisionId > 0 ? Division::find($pdo, $beforeDivisionId) : null;
+  $afterDivision = $afterDivisionId > 0 ? Division::find($pdo, $afterDivisionId) : null;
+  $beforeDivisionName = trim((string)($beforeDivision['name'] ?? ''));
+  $afterDivisionName = trim((string)($afterDivision['name'] ?? ''));
+
+  if ($afterDivisionId > 0) {
+    $body = $beforeDivisionId > 0
+      ? 'Your section assignment changed from ' . $beforeDivisionName . ' to ' . $afterDivisionName . '.'
+      : 'You were assigned to the ' . $afterDivisionName . ' section.';
+  } else {
+    $body = $beforeDivisionId > 0
+      ? 'Your section assignment to ' . $beforeDivisionName . ' was removed.'
+      : 'Your section assignment was updated.';
+  }
+
+  Notification::add(
+    $pdo,
+    $userId,
+    'Section assignment changed',
+    $body,
+    '/dashboard'
+  );
+
+  $newChiefUserId = (int)($afterDivision['chief_user_id'] ?? 0);
+  if ($afterDivisionId > 0 && $newChiefUserId > 0 && $newChiefUserId !== $userId) {
+    Notification::add(
+      $pdo,
+      $newChiefUserId,
+      'Account assigned to your section',
+      (string)($targetAfter['name'] ?? 'A user account') . ' is now assigned to ' . $afterDivisionName . '.',
+      '/admin/users?user_id=' . $userId
+    );
+  }
+}
+
+function admin_dashboard(): void {
+  global $pdo;
+  require_role('ADMIN', 'SECTION_ADMIN');
+  $uid = (int)($_SESSION['user']['id'] ?? 0);
+  $query = trim(req_str('q', ''));
+  $isSectionAdmin = admin_is_section_admin();
+  $page = max(1, req_int('page', 1));
+  $perPage = 15;
+
+  $docs = [];
+  $totalFiles = 0;
+  if ($isSectionAdmin) {
+    $actor = User::findById($pdo, $uid);
+    if ($actor) {
+      // Section admins read from the shared routed-inbox query so staff/admin
+      // dashboards stay consistent and route-scaling fixes only need one home.
+      $routeSummary = Document::summarizeRoutedToUser($pdo, $uid, (string)($actor['name'] ?? ''));
+      [$docs, $totalFiles] = Document::listRoutedToUser($pdo, $uid, (string)($actor['name'] ?? ''), $page, $perPage, $query);
+      $totalPages = max(1, (int)ceil($totalFiles / $perPage));
+      if ($page > $totalPages) {
+        $page = $totalPages;
+        [$docs, $totalFiles] = Document::listRoutedToUser($pdo, $uid, (string)($actor['name'] ?? ''), $page, $perPage, $query);
+      }
+    } else {
+      $routeSummary = [
+        'incoming' => 0,
+        'completed' => 0,
+        'under_review' => 0,
+        'priority' => 0,
+        'total' => 0,
+      ];
+    }
+  } else {
+    // Super-admin/admin queue still uses a simpler owner-scoped query, but it is
+    // paged at the SQL level now so the view does not slice large arrays in PHP.
+    $searchSql = '';
+    $params = [$uid];
+    if ($query !== '') {
+      $searchSql = "
+        AND (
+          d.name LIKE ?
+          OR COALESCE(d.title, '') LIKE ?
+          OR COALESCE(d.document_code, '') LIKE ?
+          OR COALESCE(d.current_location, '') LIKE ?
+          OR COALESCE(d.routing_status, '') LIKE ?
+          OR COALESCE(d.status, '') LIKE ?
+        )
+      ";
+      $like = '%' . $query . '%';
+      array_push($params, $like, $like, $like, $like, $like, $like);
+    }
+
+    $countStmt = $pdo->prepare("
+      SELECT COUNT(*)
+      FROM documents d
+      WHERE d.storage_area='OFFICIAL' AND d.deleted_at IS NULL AND d.owner_id = ?
+      {$searchSql}
+    ");
+    $countStmt->execute($params);
+    $totalFiles = (int)$countStmt->fetchColumn();
+    $page = min($page, max(1, (int)ceil($totalFiles / $perPage)));
+    $offset = ($page - 1) * $perPage;
+
+    $stmt = $pdo->prepare(
+      "SELECT d.*, u.name AS owner_name, u.role AS owner_role, dvn.name AS division_name,
+            (
+              SELECT route_user.name
+              FROM permissions route_perm
+              JOIN users route_user ON route_user.id = route_perm.user_id
+              WHERE route_perm.document_id = d.id
+                AND route_perm.accepted_at IS NOT NULL
+              ORDER BY route_perm.accepted_at DESC, route_perm.user_id DESC
+              LIMIT 1
+            ) AS active_recipient_name,
+            (
+              SELECT route_user.role
+              FROM permissions route_perm
+              JOIN users route_user ON route_user.id = route_perm.user_id
+              WHERE route_perm.document_id = d.id
+                AND route_perm.accepted_at IS NOT NULL
+              ORDER BY route_perm.accepted_at DESC, route_perm.user_id DESC
+              LIMIT 1
+            ) AS active_recipient_role,
+            (
+              SELECT route_div.name
+              FROM permissions route_perm
+              JOIN users route_user ON route_user.id = route_perm.user_id
+              LEFT JOIN divisions route_div ON route_div.id = route_user.division_id
+              WHERE route_perm.document_id = d.id
+                AND route_perm.accepted_at IS NOT NULL
+              ORDER BY route_perm.accepted_at DESC, route_perm.user_id DESC
+              LIMIT 1
+            ) AS active_recipient_division_name,
+            (SELECT dv.file_path FROM document_versions dv WHERE dv.document_id=d.id ORDER BY dv.version_number DESC LIMIT 1) AS latest_file_path
+      FROM documents d
+      JOIN users u ON u.id = d.owner_id
+      LEFT JOIN divisions dvn ON dvn.id = d.division_id
+      WHERE d.storage_area='OFFICIAL' AND d.deleted_at IS NULL AND d.owner_id = ?
+      {$searchSql}
+      ORDER BY d.created_at DESC
+      LIMIT {$perPage} OFFSET {$offset}"
+    );
+    $stmt->execute($params);
+    $docs = $stmt->fetchAll(PDO::FETCH_ASSOC);
+  }
+
+  $statusCounts = [
+    'waiting' => 0,
+    'routed' => 0,
+    'returned' => 0,
+    'approved' => 0,
+    'total' => $isSectionAdmin ? (int)($routeSummary['total'] ?? 0) : $totalFiles,
+  ];
+  if ($isSectionAdmin) {
+    $statusCounts['waiting'] = 0;
+    $statusCounts['routed'] = (int)($routeSummary['incoming'] ?? 0);
+    $statusCounts['returned'] = 0;
+    $statusCounts['approved'] = (int)($routeSummary['completed'] ?? 0);
+  } else {
+    $queueSummary = Document::summarizeOwnerQueue($pdo, $uid, $query);
+    $statusCounts['waiting'] = (int)($queueSummary['waiting'] ?? 0);
+    $statusCounts['routed'] = (int)($queueSummary['routed'] ?? 0);
+    $statusCounts['returned'] = (int)($queueSummary['returned'] ?? 0);
+    $statusCounts['approved'] = (int)($queueSummary['approved'] ?? 0);
+    $statusCounts['total'] = (int)($queueSummary['total'] ?? 0);
+  }
+
+  $users = User::allEmployees($pdo);
+  $users = User::attachDisplayCodes($pdo, $users);
+  $totalPages = max(1, (int)ceil($totalFiles / $perPage));
+
+  view('admin/dashboard', [
+    'stagedUploads' => $docs,
+    'dashboardQuery' => $query,
+    'statusCounts' => $statusCounts,
+    'users' => $users,
+    'dashboardPagination' => [
+      'page' => $page,
+      'per_page' => $perPage,
+      'total' => $totalFiles,
+      'pages' => $totalPages,
+    ],
+    'adminContext' => [
+      'role' => admin_actor_role(),
+      'is_section_admin' => $isSectionAdmin,
+      'can_upload' => !$isSectionAdmin,
+      'can_delete_documents' => admin_actor_role() === 'SUPER_ADMIN',
+      'can_view_logs' => !$isSectionAdmin,
+    ],
+  ]);
+}
+
 function build_user_workspace_groups(PDO $pdo, array $users): array {
   $groups = [];
 
   foreach ($users as $user) {
-    $folders = Folder::listForUser($pdo, (int)$user['id']);
-    $documents = Document::listInventoryForOwner($pdo, (int)$user['id']);
-
-    $foldersById = [];
-    foreach ($folders as $folder) {
-      $folder['documents'] = [];
-      $foldersById[(int)$folder['id']] = $folder;
-    }
-
-    $rootDocuments = [];
-    $activeDocuments = 0;
-    $trashedDocuments = 0;
-    $privateDocuments = 0;
-    $officialDocuments = 0;
-    $incomingDocuments = 0;
-    $outgoingDocuments = 0;
-    $sharedDocuments = 0;
-    $trackingDocuments = 0;
-    $versionCount = 0;
-    $latestActivityAt = null;
+    $documents = admin_list_documents_routed_to_user($pdo, $user);
+    $routedDocuments = count($documents);
+    $activeRoutes = 0;
+    $underWorkflowRoutes = 0;
+    $completedRoutes = 0;
+    $latestRouteAt = null;
 
     foreach ($documents as $document) {
-      if ($document['deleted_at'] === null) {
-        $activeDocuments++;
-      } else {
-        $trashedDocuments++;
+      $routeState = strtoupper((string)($document['route_state'] ?? 'ROUTED'));
+
+      if (in_array($routeState, ['UNDER_REVIEW', 'IN_REVIEW'], true)) {
+        $underWorkflowRoutes++;
       }
 
-      $storageArea = strtoupper((string)($document['storage_area'] ?? 'PRIVATE'));
-      if ($storageArea === 'OFFICIAL') {
-        $officialDocuments++;
-      } else {
-        $privateDocuments++;
-      }
-
-      $documentType = strtoupper((string)($document['document_type'] ?? 'INCOMING'));
-      if ($documentType === 'OUTGOING') {
-        $outgoingDocuments++;
-      } else {
-        $incomingDocuments++;
-      }
-
-      if ((int)($document['shared_count'] ?? 0) > 0) {
-        $sharedDocuments++;
-      }
-
-      $routingStatus = strtoupper((string)($document['routing_status'] ?? ''));
-      if ($routingStatus !== '' && $routingStatus !== 'NOT_ROUTED' && $routingStatus !== 'AVAILABLE') {
-        $trackingDocuments++;
-      }
-
-      $versionCount += max(0, (int)($document['version_count'] ?? 0));
-      $activityAt = trim((string)($document['last_activity_at'] ?? ''));
-      if ($activityAt !== '' && ($latestActivityAt === null || strtotime($activityAt) > strtotime($latestActivityAt))) {
-        $latestActivityAt = $activityAt;
-      }
-
-      $folderId = (int)($document['folder_id'] ?? 0);
-      if ($folderId > 0 && isset($foldersById[$folderId])) {
-        $foldersById[$folderId]['documents'][] = $document;
+      if (in_array($routeState, ['APPROVED', 'REJECTED', 'COMPLETED'], true)) {
+        $completedRoutes++;
         continue;
       }
 
-      $rootDocuments[] = $document;
+      $activeRoutes++;
+
+      $routeAt = trim((string)($document['last_route_at'] ?? ''));
+      if ($routeAt !== '' && ($latestRouteAt === null || strtotime($routeAt) > strtotime($latestRouteAt))) {
+        $latestRouteAt = $routeAt;
+      }
     }
 
     $groups[] = [
       'user' => $user,
-      'folders' => array_values($foldersById),
-      'rootDocuments' => $rootDocuments,
+      'folders' => [],
+      'rootDocuments' => [],
       'allDocuments' => $documents,
       'summary' => [
-        'folder_count' => count($folders),
-        'document_count' => count($documents),
-        'active_count' => $activeDocuments,
-        'trashed_count' => $trashedDocuments,
-        'private_count' => $privateDocuments,
-        'official_count' => $officialDocuments,
-        'incoming_count' => $incomingDocuments,
-        'outgoing_count' => $outgoingDocuments,
-        'shared_docs_count' => $sharedDocuments,
-        'tracking_count' => $trackingDocuments,
-        'version_count' => $versionCount,
-        'latest_activity_at' => $latestActivityAt,
+        'folder_count' => 0,
+        'document_count' => $routedDocuments,
+        'tracking_count' => $routedDocuments,
+        'active_count' => $activeRoutes,
+        'under_workflow_count' => $underWorkflowRoutes,
+        'completed_count' => $completedRoutes,
+        'latest_route_at' => $latestRouteAt,
       ],
     ];
   }
 
   return $groups;
+}
+
+function admin_list_documents_routed_to_user(PDO $pdo, array $user, int $page = 1, int $perPage = 0, string $search = ''): array {
+  $userId = (int)($user['id'] ?? 0);
+  $userName = trim((string)($user['name'] ?? ''));
+  [$documents] = Document::listRoutedToUser($pdo, $userId, $userName, $page, $perPage, $search);
+
+  foreach ($documents as &$document) {
+    $permission = trim((string)($document['permission'] ?? ''));
+    $reviewAssigned = (int)($document['assigned_reviewer_id'] ?? 0) === $userId;
+    $reviewStatus = strtoupper(trim((string)($document['review_acceptance_status'] ?? '')));
+
+    $routeOutcome = strtoupper((string)($document['route_outcome'] ?? 'ACTIVE'));
+    $routingStatus = strtoupper((string)($document['routing_status'] ?? 'AVAILABLE'));
+
+    if ($routeOutcome === 'COMPLETED' || $routingStatus === 'COMPLETED') {
+      $document['receiver_role'] = 'RECIPIENT';
+      $document['route_state'] = 'COMPLETED';
+      continue;
+    }
+
+    if ($permission !== '') {
+      $document['receiver_role'] = 'RECIPIENT';
+      $document['route_state'] = 'ROUTED';
+      continue;
+    }
+
+    $document['receiver_role'] = $reviewAssigned ? 'REVIEWER' : 'RECIPIENT';
+    $document['route_state'] = match ($routingStatus) {
+      'APPROVED' => 'APPROVED',
+      'REJECTED' => 'REJECTED',
+      default => match ($reviewStatus) {
+        'ACCEPTED' => 'UNDER_REVIEW',
+        default => 'ROUTED',
+      },
+    };
+  }
+  unset($document);
+
+  return $documents;
+}
+
+function admin_should_hide_division(array $division): bool {
+  return strcasecmp(trim((string)($division['name'] ?? '')), 'Records Division') === 0;
+}
+
+function build_division_user_groups(PDO $pdo, array $divisions, array $users): array {
+  $groupedByDivision = [];
+  $usersWithoutDivision = [];
+
+  // Index users by division_id for quick lookup
+  $usersByDivisionId = [];
+  foreach ($users as $user) {
+    $divId = (int)($user['division_id'] ?? 0);
+    if ($divId === 0) {
+      $usersWithoutDivision[] = $user;
+    } else {
+      if (!isset($usersByDivisionId[$divId])) {
+        $usersByDivisionId[$divId] = [];
+      }
+      $usersByDivisionId[$divId][] = $user;
+    }
+  }
+
+  // Build division groups
+  foreach ($divisions as $division) {
+    if (admin_should_hide_division($division)) {
+      continue;
+    }
+
+    $divisionId = (int)$division['id'];
+    $chief = null;
+    $staff = [];
+
+    $divisionUsers = $usersByDivisionId[$divisionId] ?? [];
+    $chiefUserId = (int)($division['chief_user_id'] ?? 0);
+
+    foreach ($divisionUsers as $user) {
+      if ((int)$user['id'] === $chiefUserId) {
+        $chief = $user;
+      } else {
+        $staff[] = $user;
+      }
+    }
+
+    // Sort staff by name
+    usort($staff, static function (array $a, array $b): int {
+      return strcmp((string)$a['name'], (string)$b['name']);
+    });
+
+    $groupedByDivision[] = [
+      'division' => $division,
+      'chief' => $chief,
+      'staff' => $staff,
+    ];
+  }
+
+  return [
+    'divisions' => $groupedByDivision,
+    'unassigned' => $usersWithoutDivision,
+  ];
 }
 
 function build_admin_user_panels(PDO $pdo, array $users, array $workspaceGroups): array {
@@ -116,12 +444,7 @@ function build_admin_user_panels(PDO $pdo, array $users, array $workspaceGroups)
   $panels = [];
   foreach ($workspaceGroups as $group) {
     $userId = (int)$group['user']['id'];
-    $documents = $group['allDocuments'];
     $logs = $logsByUserId[$userId] ?? [];
-
-    usort($documents, static function (array $a, array $b): int {
-      return strcmp((string)($b['last_activity_at'] ?? ''), (string)($a['last_activity_at'] ?? ''));
-    });
 
     $lastSeenAt = null;
     foreach ($logs as $log) {
@@ -133,13 +456,7 @@ function build_admin_user_panels(PDO $pdo, array $users, array $workspaceGroups)
     }
 
     $panels[$userId] = [
-      'recent_documents' => array_slice($documents, 0, 6),
-      'recent_logs' => $logs,
       'activity_summary' => [
-        'total' => count($logs),
-        'uploads' => count(array_filter($logs, static fn(array $log): bool => str_contains(strtolower((string)($log['action'] ?? '')), 'upload'))),
-        'reviews' => count(array_filter($logs, static fn(array $log): bool => str_contains(strtolower((string)($log['action'] ?? '')), 'review'))),
-        'shares' => count(array_filter($logs, static fn(array $log): bool => str_contains(strtolower((string)($log['action'] ?? '')), 'share'))),
         'last_seen_at' => $lastSeenAt,
       ],
     ];
@@ -313,7 +630,7 @@ function stream_xlsx_download(string $filename, array $header, array $rows, arra
     $sheetRows[] = is_array($row) ? $row : [(string)$row];
   }
 
-  $tmp = tempnam(sys_get_temp_dir(), 'wdms_xlsx_');
+  $tmp = tempnam(sys_get_temp_dir(), 'cddfts_xlsx_');
   if ($tmp === false) {
     http_response_code(500);
     exit('Failed to prepare XLSX export.');
@@ -351,14 +668,14 @@ function stream_xlsx_download(string $filename, array $header, array $rows, arra
 
   $zip->addFromString('docProps/core.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
     . '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
-    . '<dc:title>WDMS Export</dc:title><dc:creator>WDMS</dc:creator><cp:lastModifiedBy>WDMS</cp:lastModifiedBy>'
+    . '<dc:title>CDD-File-Tracking-System Export</dc:title><dc:creator>CDD-File-Tracking-System</dc:creator><cp:lastModifiedBy>CDD-File-Tracking-System</cp:lastModifiedBy>'
     . '<dcterms:created xsi:type="dcterms:W3CDTF">' . $now . '</dcterms:created>'
     . '<dcterms:modified xsi:type="dcterms:W3CDTF">' . $now . '</dcterms:modified>'
     . '</cp:coreProperties>');
 
   $zip->addFromString('docProps/app.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
     . '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
-    . '<Application>WDMS</Application></Properties>');
+    . '<Application>CDD-File-Tracking-System</Application></Properties>');
 
   $zip->addFromString('xl/workbook.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
     . '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
@@ -447,7 +764,7 @@ function stream_docx_report_download(string $filename, string $reportTitle, arra
     exit('ZipArchive extension is required for DOCX export.');
   }
 
-  $tmp = tempnam(sys_get_temp_dir(), 'wdms_docx_');
+  $tmp = tempnam(sys_get_temp_dir(), 'cddfts_docx_');
   if ($tmp === false) {
     http_response_code(500);
     exit('Failed to prepare DOCX export.');
@@ -478,7 +795,7 @@ function stream_docx_report_download(string $filename, string $reportTitle, arra
     . '<w:document xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" mc:Ignorable="w14 wp14">'
     . '<w:body>'
     . '<w:p><w:r><w:rPr><w:b/><w:sz w:val="36"/><w:color w:val="1F4E78"/></w:rPr><w:t xml:space="preserve">' . docx_escape($reportTitle) . '</w:t></w:r></w:p>'
-    . '<w:p><w:r><w:rPr><w:sz w:val="20"/><w:color w:val="5E7F89"/></w:rPr><w:t xml:space="preserve">WDMS Generated Report</w:t></w:r></w:p>'
+    . '<w:p><w:r><w:rPr><w:sz w:val="20"/><w:color w:val="5E7F89"/></w:rPr><w:t xml:space="preserve">CDD-File-Tracking-System Generated Report</w:t></w:r></w:p>'
     . '<w:p/>'
     . $metaTable
     . '<w:p/>'
@@ -510,14 +827,14 @@ function stream_docx_report_download(string $filename, string $reportTitle, arra
 
   $zip->addFromString('docProps/core.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
     . '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
-    . '<dc:title>' . docx_escape($reportTitle) . '</dc:title><dc:creator>WDMS</dc:creator><cp:lastModifiedBy>WDMS</cp:lastModifiedBy>'
+    . '<dc:title>' . docx_escape($reportTitle) . '</dc:title><dc:creator>CDD-File-Tracking-System</dc:creator><cp:lastModifiedBy>CDD-File-Tracking-System</cp:lastModifiedBy>'
     . '<dcterms:created xsi:type="dcterms:W3CDTF">' . $now . '</dcterms:created>'
     . '<dcterms:modified xsi:type="dcterms:W3CDTF">' . $now . '</dcterms:modified>'
     . '</cp:coreProperties>');
 
   $zip->addFromString('docProps/app.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
     . '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
-    . '<Application>WDMS</Application></Properties>');
+    . '<Application>CDD-File-Tracking-System</Application></Properties>');
 
   $zip->addFromString('word/document.xml', $documentXml);
   $zip->close();
@@ -636,8 +953,8 @@ function stream_pdf_logs_download(string $filename, array $user, array $logs, st
     }
 
     $titleX = $left + ($logo !== null ? 56.0 : 0.0);
-    $stream .= $formatText($titleX, $y - 10.0, 'F2', 19.0, 'WDMS');
-    $stream .= $formatText($titleX, $y - 28.0, 'F1', 10.0, 'Document Workflow and Management System');
+    $stream .= $formatText($titleX, $y - 10.0, 'F2', 19.0, 'CDD-File-Tracking-System');
+    $stream .= $formatText($titleX, $y - 28.0, 'F1', 10.0, 'Collaborative Document Distribution Workflow');
     $stream .= $formatText($titleX, $y - 43.0, 'F2', 12.0, 'Activity Log Report');
     $stream .= $formatText($left + 520.0, $y - 10.0, 'F1', 9.0, 'Generated: ' . $generatedAtPht);
     $stream .= $formatText($left + 520.0, $y - 24.0, 'F1', 9.0, 'User: ' . ((string)($user['name'] ?? '')));
@@ -808,15 +1125,29 @@ function delete_directory_recursive(string $dir): void {
 
 function admin_users(): void {
   global $pdo;
-  require_role('ADMIN');
-  $users = User::allNonAdmins($pdo);
+  require_role('ADMIN', 'SECTION_ADMIN');
+  $isSectionAdmin = admin_is_section_admin();
+  $users = admin_scoped_users($pdo);
+  $divisions = admin_scoped_divisions($pdo);
   $workspaceGroups = build_user_workspace_groups($pdo, $users);
+  $divisionGroups = build_division_user_groups($pdo, $divisions, $users);
   view('admin/users', [
-    'users' => $users,
-    'divisions' => Division::all($pdo),
-    'divisionChiefs' => User::allDivisionChiefs($pdo),
+      'users' => $users,
+    'divisions' => $divisions,
+    'divisionChiefs' => $isSectionAdmin ? [] : User::allDivisionChiefs($pdo),
     'workspaceGroups' => $workspaceGroups,
+    'divisionGroups' => $divisionGroups,
     'userPanels' => build_admin_user_panels($pdo, $users, $workspaceGroups),
+    'adminContext' => [
+      'role' => admin_actor_role(),
+      'is_section_admin' => $isSectionAdmin,
+      'can_manage_accounts' => !$isSectionAdmin,
+      'can_create_divisions' => !$isSectionAdmin,
+      'can_create_accounts' => !$isSectionAdmin,
+      'can_view_passwords' => !$isSectionAdmin,
+      'can_show_account_actions' => !$isSectionAdmin,
+      'can_export_users' => !$isSectionAdmin,
+    ],
   ]);
 }
 
@@ -824,7 +1155,7 @@ function admin_export_users(): void {
   global $pdo;
   require_role('ADMIN');
 
-  $users = User::allNonAdmins($pdo);
+  $users = User::attachDisplayCodes($pdo, User::allNonAdmins($pdo));
   $groups = build_user_workspace_groups($pdo, $users);
   $rows = [];
 
@@ -834,7 +1165,7 @@ function admin_export_users(): void {
 
     if (empty($documents)) {
       $rows[] = [
-        $user['id'],
+        $user['display_code'] ?? $user['id'],
         $user['name'],
         $user['email'],
         $user['role'],
@@ -853,7 +1184,7 @@ function admin_export_users(): void {
 
     foreach ($documents as $document) {
       $rows[] = [
-        $user['id'],
+        $user['display_code'] ?? $user['id'],
         $user['name'],
         $user['email'],
         $user['role'],
@@ -862,18 +1193,15 @@ function admin_export_users(): void {
         folder_location_label($document['folder_name'] ?? null),
         $document['id'],
         $document['name'],
-        $document['latest_version'],
-        $document['version_count'],
-        $document['shared_count'],
         $document['deleted_at'] === null ? 'ACTIVE' : 'TRASHED',
       ];
     }
   }
 
   stream_xlsx_download(
-    'wdms_user_workspace_inventory.xlsx',
+    'cdd-file-tracking-system-user-workspace-inventory.xlsx',
     [
-      'user_id',
+      'user_code',
       'user_name',
       'email',
       'role',
@@ -882,14 +1210,11 @@ function admin_export_users(): void {
       'folder_name',
       'document_id',
       'document_name',
-      'latest_version',
-      'version_count',
-      'shared_count',
       'document_state',
     ],
     $rows,
     [
-      ['WDMS USER WORKSPACE INVENTORY REPORT'],
+      ['CDD-FILE-TRACKING-SYSTEM USER WORKSPACE INVENTORY REPORT'],
       ['Generated At', date('Y-m-d H:i:s')],
       ['Generated By', (string)($_SESSION['user']['name'] ?? 'Admin')],
       ['Total Rows', (string)count($rows)],
@@ -917,7 +1242,7 @@ function admin_toggle_user(): void {
   if (!$target) {
     redirect('/admin/users?err=user_not_found');
   }
-  if (($target['role'] ?? '') === 'ADMIN' && $status === 'DISABLED' && User::countActiveAdmins($pdo) <= 1) {
+  if (in_array((string)($target['role'] ?? ''), ['SUPER_ADMIN', 'ADMIN'], true) && $status === 'DISABLED' && User::countActiveAdmins($pdo) <= 1) {
     redirect('/admin/users?err=last_admin');
   }
 
@@ -946,7 +1271,7 @@ function admin_create_division(): void {
     $divisionId = Division::create($pdo, $name, $chiefUserId > 0 ? $chiefUserId : null);
     if ($chiefUserId > 0) {
       User::setDivision($pdo, $chiefUserId, $divisionId);
-      User::setRole($pdo, $chiefUserId, 'DIVISION_CHIEF');
+      User::setRole($pdo, $chiefUserId, 'SECTION_ADMIN');
     }
   } catch (Throwable $e) {
     redirect('/admin/users?err=division_create_failed');
@@ -962,10 +1287,7 @@ function admin_change_role(): void {
   csrf_verify();
 
   $id = req_int('id', 0);
-  $role = req_str('role', 'EMPLOYEE');
-  if (!in_array($role, ['ADMIN', 'DIVISION_CHIEF', 'EMPLOYEE'], true)) {
-    $role = 'EMPLOYEE';
-  }
+  $role = User::normalizeRole(req_str('role', 'SECTION_STAFF'));
   $divisionId = req_int('division_id', 0);
   if (!admin_reauth_ok($pdo, req_str('confirm_password', ''))) {
     redirect('/admin/users?err=reauth_failed');
@@ -979,15 +1301,20 @@ function admin_change_role(): void {
   if (!$target) {
     redirect('/admin/users?err=user_not_found');
   }
-  if (($target['role'] ?? '') === 'ADMIN' && $role !== 'ADMIN' && User::countAdmins($pdo) <= 1) {
+  if (in_array($role, ['SUPER_ADMIN', 'ADMIN'], true)) {
+    $divisionId = 0;
+  }
+  if (in_array((string)($target['role'] ?? ''), ['SUPER_ADMIN', 'ADMIN'], true) && !in_array($role, ['SUPER_ADMIN', 'ADMIN'], true) && User::countAdmins($pdo) <= 1) {
     redirect('/admin/users?err=last_admin');
   }
 
   User::setRole($pdo, $id, $role);
   User::setDivision($pdo, $id, $divisionId > 0 ? $divisionId : null);
-  if ($role === 'DIVISION_CHIEF' && $divisionId > 0) {
+  if ($role === 'SECTION_ADMIN' && $divisionId > 0) {
     Division::updateChief($pdo, $divisionId, $id);
   }
+  $updatedTarget = User::findById($pdo, $id) ?? $target;
+  admin_notify_section_assignment_changed($pdo, $target, $updatedTarget);
   AuditLog::add($pdo, (int)$_SESSION['user']['id'], "Changed user role", null, "user_id=$id,role=$role");
 
   redirect('/admin/users?msg=role_updated');
@@ -998,19 +1325,16 @@ function admin_create_user(): void {
   require_role('ADMIN');
   csrf_verify();
 
-  if (!admin_reauth_ok($pdo, req_str('confirm_password', ''))) {
-    redirect('/admin/users?err=reauth_failed');
-  }
-
   $name = trim(req_str('name', ''));
   $email = strtolower(trim(req_str('email', '')));
-  $role = req_str('role', 'EMPLOYEE');
-  if (!in_array($role, ['ADMIN', 'DIVISION_CHIEF', 'EMPLOYEE'], true)) {
-    $role = 'EMPLOYEE';
-  }
+  $password = trim(req_str('password', ''));
+  $role = User::normalizeRole(req_str('role', 'SECTION_STAFF'));
   $divisionId = req_int('division_id', 0);
+  if (in_array($role, ['SUPER_ADMIN', 'ADMIN'], true)) {
+    $divisionId = 0;
+  }
 
-  if ($name === '' || $email === '') {
+  if ($name === '' || $email === '' || $password === '') {
     redirect('/admin/users?err=missing_fields');
   }
   if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
@@ -1020,19 +1344,20 @@ function admin_create_user(): void {
     redirect('/admin/users?err=email_exists');
   }
 
-  $defaultPassword = 'password';
   $newId = User::create(
     $pdo,
     $name,
     $email,
     $role,
     'ACTIVE',
-    password_hash($defaultPassword, PASSWORD_DEFAULT),
-    $divisionId > 0 ? $divisionId : null
+    User::hashPassword($password),
+    $divisionId > 0 ? $divisionId : null,
+    $password
   );
-  if ($role === 'DIVISION_CHIEF' && $divisionId > 0) {
+  if ($role === 'SECTION_ADMIN' && $divisionId > 0) {
     Division::updateChief($pdo, $divisionId, $newId);
   }
+  admin_notify_account_created_under_section($pdo, $newId, $divisionId > 0 ? $divisionId : null);
   AuditLog::add(
     $pdo,
     (int)$_SESSION['user']['id'],
@@ -1041,7 +1366,7 @@ function admin_create_user(): void {
     "user_id=".$newId.",email=".$email.",role=".$role
   );
 
-  redirect('/admin/users?msg=user_created');
+  redirect('/admin/users?msg=user_created&created_email=' . urlencode($email) . '&created_password=' . urlencode($password));
 }
 
 function admin_change_user_password(): void {
@@ -1074,7 +1399,7 @@ function admin_change_user_password(): void {
     redirect('/admin/users?user_id=' . $id . '&err=password_mismatch');
   }
 
-  User::updatePassword($pdo, $id, password_hash($next, PASSWORD_DEFAULT));
+  User::updatePassword($pdo, $id, User::hashPassword($next), $next);
   AuditLog::add(
     $pdo,
     (int)($_SESSION['user']['id'] ?? 0),
@@ -1084,6 +1409,68 @@ function admin_change_user_password(): void {
   );
 
   redirect('/admin/users?user_id=' . $id . '&msg=password_updated');
+}
+
+function admin_reset_user_password(): void {
+  global $pdo;
+  require_role('ADMIN');
+  csrf_verify();
+
+  if (!admin_reauth_ok($pdo, req_str('confirm_password', ''))) {
+    redirect('/admin/users?err=reauth_failed');
+  }
+
+  $id = req_int('id', 0);
+  if ($id <= 0) {
+    redirect('/admin/users?err=user_not_found');
+  }
+
+  $target = User::findById($pdo, $id);
+  if (!$target) {
+    redirect('/admin/users?err=user_not_found');
+  }
+
+  User::updatePassword($pdo, $id, User::hashPassword(User::defaultPassword()), User::defaultPassword());
+  AuditLog::add(
+    $pdo,
+    (int)($_SESSION['user']['id'] ?? 0),
+    'Reset user password to default',
+    null,
+    'user_id=' . $id . ',email=' . ((string)($target['email'] ?? ''))
+  );
+
+  redirect('/admin/users?user_id=' . $id . '&msg=password_reset_to_default');
+}
+
+function admin_reveal_user_password(): void {
+  global $pdo;
+  require_role('ADMIN');
+  csrf_verify();
+
+  header('Content-Type: application/json; charset=utf-8');
+  $id = req_int('id', 0);
+  if (!admin_reauth_ok($pdo, req_str('confirm_password', ''))) {
+    http_response_code(403);
+    echo json_encode(['ok' => false, 'error' => 'reauth_failed']);
+    return;
+  }
+
+  $target = $id > 0 ? User::findById($pdo, $id) : null;
+  if (!$target) {
+    http_response_code(404);
+    echo json_encode(['ok' => false, 'error' => 'user_not_found']);
+    return;
+  }
+
+  $password = trim((string)($target['generated_password'] ?? ''));
+  if ($password === '') {
+    http_response_code(404);
+    echo json_encode(['ok' => false, 'error' => 'password_not_stored']);
+    return;
+  }
+
+  AuditLog::add($pdo, (int)($_SESSION['user']['id'] ?? 0), 'Revealed stored account password', null, 'user_id=' . $id);
+  echo json_encode(['ok' => true, 'password' => $password], JSON_UNESCAPED_SLASHES);
 }
 
 function admin_delete_user(): void {
@@ -1108,7 +1495,7 @@ function admin_delete_user(): void {
   if (!$target) {
     redirect('/admin/users?err=user_not_found');
   }
-  if (($target['role'] ?? '') === 'ADMIN' && User::countAdmins($pdo) <= 1) {
+  if (in_array((string)($target['role'] ?? ''), ['SUPER_ADMIN', 'ADMIN'], true) && User::countAdmins($pdo) <= 1) {
     redirect('/admin/users?err=last_admin');
   }
 
@@ -1159,9 +1546,9 @@ function admin_delete_user(): void {
 function admin_logs(): void {
   global $pdo;
   require_role('ADMIN');
-  $users = User::all($pdo);
+  $users = User::attachDisplayCodes($pdo, User::all($pdo));
   $selectedUserId = req_int('user_id', !empty($users) ? (int)$users[0]['id'] : 0);
-  $selectedUser = User::findById($pdo, $selectedUserId);
+  $selectedUser = User::withDisplayCode($pdo, User::findById($pdo, $selectedUserId));
   if (!$selectedUser && !empty($users)) {
     $selectedUserId = (int)$users[0]['id'];
     $selectedUser = $users[0];
@@ -1171,8 +1558,12 @@ function admin_logs(): void {
   $selectedMonth = (string)$monthBounds['month'];
   $dateFrom = (string)$monthBounds['from'];
   $dateTo = (string)$monthBounds['to'];
+  $selectedCategory = strtoupper(req_str('category', 'ALL'));
+  if ($selectedCategory !== 'ALL' && !in_array($selectedCategory, AuditLog::categories(), true)) {
+    $selectedCategory = 'ALL';
+  }
 
-  $logs = $selectedUser ? AuditLog::allForUserWithUser($pdo, (int)$selectedUserId) : [];
+  $logs = $selectedUser ? AuditLog::allForUserWithUser($pdo, (int)$selectedUserId, $selectedCategory) : [];
   $logs = array_values(array_filter($logs, static function (array $row) use ($dateFrom, $dateTo): bool {
     $dt = admin_datetime_pht((string)($row['created_at'] ?? ''));
     if (!$dt) {
@@ -1184,8 +1575,13 @@ function admin_logs(): void {
 
   $documentEvents = 0;
   $sharingEvents = 0;
+  $categorySummary = array_fill_keys(AuditLog::categories(), 0);
   foreach ($logs as $log) {
     $action = strtolower((string)($log['action'] ?? ''));
+    $category = strtoupper((string)($log['category'] ?? 'SYSTEM'));
+    if (isset($categorySummary[$category])) {
+      $categorySummary[$category]++;
+    }
     if (str_contains($action, 'document') || str_contains($action, 'version')) {
       $documentEvents++;
     }
@@ -1204,8 +1600,11 @@ function admin_logs(): void {
       'total' => count($logs),
       'document_events' => $documentEvents,
       'sharing_events' => $sharingEvents,
+      'categories' => $categorySummary,
     ],
     'selectedMonth' => $selectedMonth,
+    'selectedCategory' => $selectedCategory,
+    'categories' => AuditLog::categories(),
     'selectedMonthLabel' => DateTimeImmutable::createFromFormat('!Y-m', $selectedMonth, new DateTimeZone('Asia/Manila'))->format('F Y'),
   ]);
 }
@@ -1214,7 +1613,7 @@ function admin_export_logs(): void {
   global $pdo;
   require_role('ADMIN');
   $userId = req_int('user_id', 0);
-  $user = User::findById($pdo, $userId);
+  $user = User::withDisplayCode($pdo, User::findById($pdo, $userId));
   if (!$user) {
     redirect('/admin/logs?err=user_not_found');
   }
@@ -1222,8 +1621,12 @@ function admin_export_logs(): void {
   $selectedMonth = (string)$monthBounds['month'];
   $dateFrom = (string)$monthBounds['from'];
   $dateTo = (string)$monthBounds['to'];
+  $selectedCategory = strtoupper(req_str('category', 'ALL'));
+  if ($selectedCategory !== 'ALL' && !in_array($selectedCategory, AuditLog::categories(), true)) {
+    $selectedCategory = 'ALL';
+  }
 
-  $logs = AuditLog::allForUserWithUser($pdo, $userId);
+  $logs = AuditLog::allForUserWithUser($pdo, $userId, $selectedCategory);
   $logs = array_values(array_filter($logs, static function (array $row) use ($dateFrom, $dateTo): bool {
     $dt = admin_datetime_pht((string)($row['created_at'] ?? ''));
     if (!$dt) {
@@ -1239,4 +1642,62 @@ function admin_export_logs(): void {
     $logs,
     DateTimeImmutable::createFromFormat('!Y-m', $selectedMonth, new DateTimeZone('Asia/Manila'))->format('F Y')
   );
+}
+
+function admin_routed_report(): void {
+  global $pdo;
+  require_role('ADMIN');
+
+  $monthBounds = admin_month_bounds(req_str('month', date('Y-m')));
+  $selectedMonth = (string)$monthBounds['month'];
+  $dateFrom = (string)$monthBounds['from'];
+  $dateTo = (string)$monthBounds['to'];
+
+  $s = $pdo->prepare("SELECT r.*, d.name AS doc_name, d.title AS doc_title, d.owner_id AS owner_id, u.name AS routed_by_name, u.email AS routed_by_email, o.name AS owner_name
+    FROM document_routes r
+    LEFT JOIN documents d ON d.id = r.document_id
+    LEFT JOIN users u ON u.id = r.routed_by
+    LEFT JOIN users o ON o.id = d.owner_id
+    WHERE r.routed_at >= ? AND r.routed_at <= ?
+    ORDER BY r.routed_at DESC, r.id DESC");
+  $s->execute([$dateFrom . ' 00:00:00', $dateTo . ' 23:59:59']);
+  $routes = $s->fetchAll();
+
+  view('admin/routed', [
+    'routes' => $routes,
+    'selectedMonth' => $selectedMonth,
+    'selectedMonthLabel' => DateTimeImmutable::createFromFormat('!Y-m', $selectedMonth, new DateTimeZone('Asia/Manila'))->format('F Y'),
+  ]);
+}
+
+function admin_export_routed(): void {
+  global $pdo;
+  require_role('ADMIN');
+
+  $monthBounds = admin_month_bounds(req_str('month', date('Y-m')));
+  $selectedMonth = (string)$monthBounds['month'];
+  $dateFrom = (string)$monthBounds['from'];
+  $dateTo = (string)$monthBounds['to'];
+
+  $s = $pdo->prepare("SELECT r.*, d.name AS doc_name, d.title AS doc_title, d.owner_id AS owner_id, u.name AS routed_by_name, u.email AS routed_by_email, o.name AS owner_name
+    FROM document_routes r
+    LEFT JOIN documents d ON d.id = r.document_id
+    LEFT JOIN users u ON u.id = r.routed_by
+    LEFT JOIN users o ON o.id = d.owner_id
+    WHERE r.routed_at >= ? AND r.routed_at <= ?
+    ORDER BY r.routed_at DESC, r.id DESC");
+  $s->execute([$dateFrom . ' 00:00:00', $dateTo . ' 23:59:59']);
+  $routes = $s->fetchAll();
+
+  $filename = 'Routed-Report-' . filename_segment($selectedMonth) . '.csv';
+  header('Content-Type: text/csv; charset=utf-8');
+  header('Content-Disposition: attachment; filename="' . $filename . '"');
+  $out = fopen('php://output', 'w');
+  fputcsv($out, ['Routed At', 'Document ID', 'Document Name', 'Title', 'From', 'To', 'Status', 'Note', 'Routed By', 'Routed By Email', 'Owner']);
+  foreach ($routes as $r) {
+    $routedAt = $r['routed_at'] ?? $r['created_at'] ?? '';
+    fputcsv($out, [$routedAt, $r['document_id'] ?? '', $r['doc_name'] ?? '', $r['doc_title'] ?? '', $r['from_location'] ?? '', $r['to_location'] ?? '', $r['status_snapshot'] ?? '', $r['note'] ?? '', $r['routed_by_name'] ?? '', $r['routed_by_email'] ?? '', $r['owner_name'] ?? '']);
+  }
+  fclose($out);
+  exit;
 }

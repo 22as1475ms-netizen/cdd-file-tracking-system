@@ -6,7 +6,7 @@ require_once __DIR__ . "/../models/Permission.php";
 require_once __DIR__ . "/../models/Version.php";
 require_once __DIR__ . "/../models/AuditLog.php";
 require_once __DIR__ . "/../models/Notification.php";
-require_once __DIR__ . "/../models/ChatMessage.php";
+require_once __DIR__ . "/../models/Organization.php";
 require_once __DIR__ . "/../services/AuthService.php";
 require_once __DIR__ . "/../services/AccessService.php";
 require_once __DIR__ . "/../services/DocumentService.php";
@@ -14,7 +14,7 @@ require_once __DIR__ . "/../services/DocumentShareService.php";
 require_once __DIR__ . "/../services/StorageService.php";
 
 function api_selected_owner_id(PDO $pdo, int $sessionUserId): int {
-  $isAdmin = (($_SESSION['user']['role'] ?? '') === 'ADMIN');
+  $isAdmin = in_array(strtoupper((string)($_SESSION['user']['role'] ?? '')), ['SUPER_ADMIN', 'ADMIN'], true);
   if (!$isAdmin) {
     return $sessionUserId;
   }
@@ -24,11 +24,59 @@ function api_selected_owner_id(PDO $pdo, int $sessionUserId): int {
 }
 
 function api_can_manage_document(array $doc, int $uid): bool {
-  return (($_SESSION['user']['role'] ?? '') === 'ADMIN') || (int)$doc['owner_id'] === $uid;
+  return in_array(strtoupper((string)($_SESSION['user']['role'] ?? '')), ['SUPER_ADMIN', 'ADMIN'], true) || (int)$doc['owner_id'] === $uid;
 }
 
-function api_chat_allowed(): bool {
-  return strtoupper((string)($_SESSION['user']['role'] ?? '')) !== 'ADMIN';
+function api_can_rename_document_title(array $doc, int $uid): bool {
+  return api_can_manage_document($doc, $uid)
+    && (int)($doc['approval_locked'] ?? 0) !== 1
+    && !in_array(strtoupper((string)($doc['route_outcome'] ?? 'ACTIVE')), ['APPROVED', 'ARCHIVED'], true)
+    && !in_array(strtoupper((string)($doc['routing_status'] ?? 'AVAILABLE')), ['APPROVED', 'REJECTED'], true);
+}
+
+function api_editor_title_clean(string $title, string $extension): string {
+  $clean = trim($title);
+  $extension = strtolower(trim($extension, ". \t\n\r\0\x0B"));
+  if ($clean === '' || $extension === '') {
+    return $clean;
+  }
+
+  $clean = str_ireplace('.' . $extension, '', $clean);
+  $clean = preg_replace('/\s+/', ' ', $clean) ?? $clean;
+  return trim($clean);
+}
+
+function api_editor_file_name(string $fileName, string $fallbackName, string $extension): string {
+  $extension = strtolower(trim($extension, ". \t\n\r\0\x0B"));
+  $source = trim($fileName) !== '' ? trim($fileName) : trim($fallbackName);
+  $base = trim((string)preg_replace('/\.[^.\/\\\\]+$/', '', $source));
+  $base = api_editor_title_clean($base, $extension);
+  if ($base === '') {
+    $base = api_editor_title_clean((string)pathinfo($fallbackName, PATHINFO_FILENAME), $extension);
+  }
+  if ($base === '') {
+    $base = 'document';
+  }
+  return $base . '.' . $extension;
+}
+
+function api_can_invite_to_section(PDO $pdo, array $user, int $sectionId): bool {
+  if ($sectionId <= 0) {
+    return false;
+  }
+  return TeamMember::isSectionChief($pdo, (int)($user['id'] ?? 0), $sectionId);
+}
+
+function api_can_manage_section(PDO $pdo, array $user, int $sectionId): bool {
+  if ($sectionId <= 0) {
+    return false;
+  }
+
+  if (in_array(strtoupper((string)($user['role'] ?? '')), ['SUPER_ADMIN', 'ADMIN'], true)) {
+    return true;
+  }
+
+  return TeamMember::isSectionChief($pdo, (int)($user['id'] ?? 0), $sectionId);
 }
 
 function api_dispatch(string $method, string $path): bool {
@@ -55,16 +103,142 @@ function api_dispatch(string $method, string $path): bool {
     api_json(200, ['user' => api_user()]);
   }
 
+  if ($path === '/api/admin/org-update' && $method === 'POST') {
+    api_require_login();
+    $currentUser = $_SESSION['user'] ?? null;
+    if (!$currentUser) {
+      api_json(403, ['error' => 'Unauthorized']);
+    }
+
+    $data = api_input();
+    $action = trim((string)($data['action'] ?? ''));
+
+    if ($action === 'add_section') {
+      // Only admins can create new sections/teams.
+      $isAdmin = in_array(strtoupper((string)($currentUser['role'] ?? '')), ['SUPER_ADMIN', 'ADMIN'], true);
+      if (!$isAdmin) {
+        api_json(403, ['error' => 'Only admins can create teams.']);
+      }
+
+      $orgId = (int)($data['org_id'] ?? 0);
+      $name = trim((string)($data['name'] ?? ''));
+      $description = trim((string)($data['description'] ?? ''));
+
+      if ($orgId <= 0 || $name === '') {
+        api_json(422, ['error' => 'org_id and name are required']);
+      }
+
+      $sectionId = Section::create($pdo, $orgId, $name, $description, (int)$currentUser['id']);
+      api_json(200, ['ok' => true, 'section_id' => $sectionId]);
+    }
+
+    if ($action === 'remove_member') {
+      $sectionId = (int)($data['section_id'] ?? 0);
+      $userId = (int)($data['user_id'] ?? 0);
+      if ($sectionId <= 0 || $userId <= 0) {
+        api_json(422, ['error' => 'section_id and user_id are required']);
+      }
+      if (!api_can_invite_to_section($pdo, $currentUser, $sectionId)) {
+        api_json(403, ['error' => 'Only the assigned section chief can manage section members.']);
+      }
+
+      TeamMember::removeMember($pdo, $sectionId, $userId);
+      api_json(200, ['ok' => true]);
+    }
+
+    if ($action === 'delete_section') {
+      $sectionId = (int)($data['section_id'] ?? 0);
+      if ($sectionId <= 0) {
+        api_json(422, ['error' => 'section_id is required']);
+      }
+      if (!api_can_manage_section($pdo, $currentUser, $sectionId)) {
+        api_json(403, ['error' => 'Only admins or the assigned section chief can delete this team.']);
+      }
+
+      Section::delete($pdo, $sectionId);
+      api_json(200, ['ok' => true]);
+    }
+
+    if ($action === 'update_chief') {
+      if (!in_array(strtoupper((string)($currentUser['role'] ?? '')), ['SUPER_ADMIN', 'ADMIN'], true)) {
+        api_json(403, ['error' => 'Only admins can assign section chiefs.']);
+      }
+
+      $sectionId = (int)($data['section_id'] ?? 0);
+      $chiefId = (int)($data['chief_id'] ?? 0);
+      if ($sectionId <= 0 || $chiefId <= 0) {
+        api_json(422, ['error' => 'section_id and chief_id are required']);
+      }
+
+      $section = Section::findById($pdo, $sectionId);
+      if (!$section) {
+        api_json(404, ['error' => 'Section not found']);
+      }
+
+      Section::update($pdo, $sectionId, (string)$section['name'], (string)($section['description'] ?? ''), $chiefId);
+      TeamMember::setSectionChief($pdo, $sectionId, $chiefId, (int)$currentUser['id']);
+      api_json(200, ['ok' => true]);
+    }
+
+    if ($action === 'update_member') {
+      $sectionId = (int)($data['section_id'] ?? 0);
+      $userId = (int)($data['user_id'] ?? 0);
+      $role = strtoupper(trim((string)($data['role'] ?? 'MEMBER')));
+      $delegateUserId = (int)($data['delegate_user_id'] ?? 0);
+      $delegateNote = trim((string)($data['delegate_note'] ?? ''));
+
+      if ($sectionId <= 0 || $userId <= 0) {
+        api_json(422, ['error' => 'section_id and user_id are required']);
+      }
+      if (!api_can_invite_to_section($pdo, $currentUser, $sectionId)) {
+        api_json(403, ['error' => 'Only the assigned section chief can manage section members.']);
+      }
+      if (!TeamMember::exists($pdo, $sectionId, $userId)) {
+        api_json(404, ['error' => 'Member not found in this section']);
+      }
+      if (!in_array($role, ['MEMBER', 'TEAM_LEAD'], true)) {
+        $role = 'MEMBER';
+      }
+
+      $delegateId = null;
+      if ($delegateUserId > 0) {
+        if ($delegateUserId === $userId) {
+          api_json(422, ['error' => 'A member cannot delegate approval to themselves.']);
+        }
+        if (!TeamMember::exists($pdo, $sectionId, $delegateUserId)) {
+          api_json(422, ['error' => 'Delegate must be an existing member of the same section.']);
+        }
+
+        $delegateUser = User::findById($pdo, $delegateUserId);
+        if (!$delegateUser || strtoupper((string)($delegateUser['status'] ?? 'DISABLED')) !== 'ACTIVE') {
+          api_json(422, ['error' => 'Delegate must be an active account.']);
+        }
+        if (in_array(strtoupper((string)($delegateUser['role'] ?? '')), ['SUPER_ADMIN', 'ADMIN'], true)) {
+          api_json(422, ['error' => 'Admin accounts cannot be used as delegates.']);
+        }
+
+        $delegateId = $delegateUserId;
+      }
+
+      TeamMember::updateMember($pdo, $sectionId, $userId, $role, $delegateId, $delegateNote !== '' ? $delegateNote : null);
+      api_json(200, ['ok' => true]);
+    }
+
+    api_json(422, ['error' => 'Unsupported action']);
+  }
+
   if ($path === '/api/notifications/unread' && $method === 'GET') {
     api_require_login();
     $uid = (int)$_SESSION['user']['id'];
     $items = Notification::recentAll($pdo, $uid, 8);
     $payloadItems = array_map(static function (array $row): array {
       return [
+        'id' => (int)($row['id'] ?? 0),
         'title' => (string)($row['title'] ?? ''),
         'body' => (string)($row['body'] ?? ''),
         'link' => Notification::resolveDestination($row),
         'is_read' => (int)($row['is_read'] ?? 0) === 1,
+        'created_at' => (string)($row['created_at'] ?? ''),
       ];
     }, $items);
 
@@ -74,101 +248,317 @@ function api_dispatch(string $method, string $path): bool {
     ]);
   }
 
-  if ($path === '/api/chat/conversations' && $method === 'GET') {
-    api_require_login();
-    if (!api_chat_allowed()) {
-      api_json(403, ['message' => 'Chat unavailable']);
-    }
-    $uid = (int)$_SESSION['user']['id'];
-    $rows = ChatMessage::conversations($pdo, $uid);
-    $items = array_map(static function (array $row): array {
-      return [
-        'peer_id' => (int)$row['peer_id'],
-        'peer_name' => (string)($row['peer_name'] ?? ''),
-        'peer_email' => (string)($row['peer_email'] ?? ''),
-        'peer_avatar_photo' => (string)($row['peer_avatar_photo'] ?? ''),
-        'peer_avatar_preset' => (string)($row['peer_avatar_preset'] ?? ''),
-        'last_message' => (string)($row['last_message'] ?? ''),
-        'last_created_at' => (string)($row['last_created_at'] ?? ''),
-        'unread_count' => (int)($row['unread_count'] ?? 0),
-      ];
-    }, $rows);
-    api_json(200, ['items' => $items, 'unread_total' => ChatMessage::unreadTotal($pdo, $uid)]);
-  }
-
-  if (preg_match('#^/api/chat/thread/(\d+)$#', $path, $m) && $method === 'GET') {
-    api_require_login();
-    if (!api_chat_allowed()) {
-      api_json(403, ['message' => 'Chat unavailable']);
-    }
-    $uid = (int)$_SESSION['user']['id'];
-    $peerId = (int)$m[1];
-    if ($peerId <= 0 || $peerId === $uid) {
-      api_json(422, ['message' => 'Invalid chat recipient']);
-    }
-    ChatMessage::markThreadRead($pdo, $uid, $peerId);
-    $rows = ChatMessage::thread($pdo, $uid, $peerId, 100);
-    $items = array_map(static function (array $row) use ($uid): array {
-      $attachmentPath = trim((string)($row['attachment_path'] ?? ''));
-      $attachmentMime = trim((string)($row['attachment_mime'] ?? ''));
-      return [
-        'id' => (int)$row['id'],
-        'sender_id' => (int)$row['sender_id'],
-        'recipient_id' => (int)$row['recipient_id'],
-        'document_id' => (int)($row['document_id'] ?? 0),
-        'message' => (string)($row['message'] ?? ''),
-        'attachment_url' => $attachmentPath !== '' ? api_public_file_url($attachmentPath) : '',
-        'attachment_name' => (string)($row['attachment_name'] ?? ''),
-        'attachment_mime' => $attachmentMime,
-        'attachment_is_image' => str_starts_with(strtolower($attachmentMime), 'image/'),
-        'created_at' => (string)($row['created_at'] ?? ''),
-        'is_mine' => (int)$row['sender_id'] === $uid,
-      ];
-    }, $rows);
-    api_json(200, ['items' => $items]);
-  }
-
-  if (preg_match('#^/api/chat/thread/(\d+)$#', $path, $m) && $method === 'DELETE') {
-    api_require_login();
-    if (!api_chat_allowed()) {
-      api_json(403, ['message' => 'Chat unavailable']);
-    }
-    $uid = (int)$_SESSION['user']['id'];
-    $peerId = (int)$m[1];
-    if ($peerId <= 0 || $peerId === $uid) {
-      api_json(422, ['message' => 'Invalid chat recipient']);
-    }
-    $deleted = ChatMessage::deleteThreadForUser($pdo, $uid, $peerId);
-    api_json(200, ['ok' => true, 'deleted' => $deleted, 'unread_total' => ChatMessage::unreadTotal($pdo, $uid)]);
-  }
-
-  if ($path === '/api/chat/send' && $method === 'POST') {
-    api_require_write_request();
-    if (!api_chat_allowed()) {
-      api_json(403, ['message' => 'Chat unavailable']);
-    }
-    $uid = (int)$_SESSION['user']['id'];
+  if ($path === '/api/integrations/spreadsheet/open' && $method === 'POST') {
     $data = api_input();
-    $peerId = (int)($data['peer_id'] ?? 0);
-    $peerEmail = trim((string)($data['peer_email'] ?? ''));
-    $message = trim((string)($data['message'] ?? ''));
     $docId = (int)($data['document_id'] ?? 0);
-    $attachment = api_handle_chat_attachment($_FILES['attachment'] ?? null);
+    $launchToken = trim((string)($data['launch_token'] ?? ''));
 
-    if ($peerId <= 0 && $peerEmail !== '') {
-      $peer = User::findByEmail($pdo, $peerEmail);
-      $peerId = $peer ? (int)$peer['id'] : 0;
-    }
-    if ($peerId <= 0 || $peerId === $uid) {
-      api_json(422, ['message' => 'Invalid recipient']);
-    }
-    if ($message === '' && empty($attachment)) {
-      api_json(422, ['message' => 'Message or attachment is required']);
+    if ($docId <= 0 || $launchToken === '') {
+      api_json(422, ['message' => 'Missing document_id or launch_token.']);
     }
 
-    $id = ChatMessage::send($pdo, $uid, $peerId, $message, max(0, $docId), $attachment);
-    Notification::add($pdo, $peerId, "New chat message", (string)($_SESSION['user']['email'] ?? 'A user'), "chat://open");
-    api_json(201, ['ok' => true, 'id' => $id]);
+    $tokenPayload = DocumentService::verifySpreadsheetLaunchToken($launchToken, $docId);
+    if (!$tokenPayload) {
+      api_json(403, ['message' => 'Invalid or expired launch token.']);
+    }
+
+    $doc = Document::get($pdo, $docId);
+    if (!$doc) {
+      api_json(404, ['message' => 'Document not found.']);
+    }
+
+    $extension = strtolower((string)pathinfo((string)($doc['name'] ?? ''), PATHINFO_EXTENSION));
+    if (!in_array($extension, ['xls', 'xlsx'], true)) {
+      api_json(422, ['message' => 'This document is not a spreadsheet.']);
+    }
+
+    $latestVersion = Version::latest($pdo, $docId);
+    if (!$latestVersion || trim((string)($latestVersion['file_path'] ?? '')) === '') {
+      api_json(404, ['message' => 'No file version found for this document.']);
+    }
+
+    $content = StorageService::withReadablePath(
+      $pdo,
+      (string)$latestVersion['file_path'],
+      static fn(string $path): string|false => file_get_contents($path)
+    );
+
+    if ($content === false || $content === null) {
+      api_json(500, ['message' => 'Unable to load spreadsheet content.']);
+    }
+
+    $userId = max(1, (int)($tokenPayload['user_id'] ?? (int)($doc['owner_id'] ?? 1)));
+    $userLevel = AccessService::level($pdo, $docId, $userId);
+    $documentTitle = api_editor_title_clean((string)($doc['title'] ?? ''), $extension);
+    $displayName = $documentTitle !== '' ? $documentTitle : (string)($doc['name'] ?? 'spreadsheet.xlsx');
+    if ($displayName === '') {
+      $displayName = 'spreadsheet';
+    }
+    if ($extension !== '') {
+      $displayName = api_editor_file_name($displayName, (string)($doc['name'] ?? 'spreadsheet.xlsx'), $extension);
+    }
+
+    api_json(200, [
+      'document_id' => $docId,
+      'document_name' => $displayName,
+      'document_title' => $documentTitle,
+      'can_rename_title' => api_can_rename_document_title($doc, $userId),
+      'read_only' => !AccessService::canEditDocumentRecord($doc, $userLevel),
+      'read_only_reason' => AccessService::editLockReason($doc, $userLevel),
+      'file_name' => (string)($doc['name'] ?? 'spreadsheet.xlsx'),
+      'mime_type' => api_spreadsheet_mime_type($extension),
+      'content_base64' => base64_encode((string)$content),
+    ]);
+  }
+
+  if ($path === '/api/integrations/spreadsheet/save' && $method === 'POST') {
+    $data = api_input();
+    $docId = (int)($data['document_id'] ?? 0);
+    $launchToken = trim((string)($data['launch_token'] ?? ''));
+    $contentBase64 = trim((string)($data['content_base64'] ?? ''));
+    $fileName = trim((string)($data['file_name'] ?? ''));
+    $documentTitle = trim((string)($data['document_title'] ?? ''));
+    $sheetName = trim((string)($data['sheet_name'] ?? ''));
+    $changeSummary = trim((string)($data['change_summary'] ?? ''));
+    $sheetName = trim((string)($data['sheet_name'] ?? ''));
+    $changeSummary = trim((string)($data['change_summary'] ?? ''));
+
+    if ($docId <= 0 || $launchToken === '' || $contentBase64 === '') {
+      api_json(422, ['message' => 'Missing document_id, launch_token, or content_base64.']);
+    }
+
+    $tokenPayload = DocumentService::verifySpreadsheetLaunchToken($launchToken, $docId);
+    if (!$tokenPayload) {
+      api_json(403, ['message' => 'Invalid or expired launch token.']);
+    }
+
+    $doc = Document::get($pdo, $docId);
+    $content = base64_decode($contentBase64, true);
+    if ($content === false) {
+      api_json(422, ['message' => 'Spreadsheet payload is not valid base64.']);
+    }
+
+    if (!$doc) {
+      api_json(404, ['message' => 'Document not found.']);
+    }
+
+    $userId = max(1, (int)($tokenPayload['user_id'] ?? (int)($doc['owner_id'] ?? 1)));
+    $extension = strtolower((string)pathinfo((string)($doc['name'] ?? ''), PATHINFO_EXTENSION));
+    if (!in_array($extension, ['xls', 'xlsx'], true)) {
+      api_json(422, ['message' => 'This document is not a spreadsheet.']);
+    }
+
+    $userLevel = AccessService::level($pdo, $docId, $userId);
+    if (!AccessService::canEditDocumentRecord($doc, $userLevel)) {
+      api_json(403, ['message' => AccessService::editLockReason($doc, $userLevel)]);
+    }
+
+    $canRenameTitle = api_can_rename_document_title($doc, $userId);
+    $storedDocumentTitle = api_editor_title_clean((string)($doc['title'] ?? ''), $extension);
+    if ($storedDocumentTitle === '') {
+      $storedDocumentTitle = api_editor_title_clean((string)pathinfo((string)($doc['name'] ?? 'spreadsheet.' . $extension), PATHINFO_FILENAME), $extension);
+    }
+    $documentTitle = api_editor_title_clean($documentTitle !== '' ? $documentTitle : $fileName, $extension);
+    $savedDocumentTitle = $canRenameTitle ? $documentTitle : $storedDocumentTitle;
+
+    $pdo->beginTransaction();
+    try {
+      if ($docId > 0) {
+        $nextFileName = api_editor_file_name($canRenameTitle ? $fileName : (string)($doc['name'] ?? ''), (string)($doc['name'] ?? ('spreadsheet.' . $extension)), $extension);
+        if ($canRenameTitle) {
+          Document::updateTitle($pdo, $docId, $documentTitle !== '' ? $documentTitle : null);
+        }
+
+        $versionNumber = DocumentService::uploadNewVersionFromContents($pdo, $docId, $nextFileName, (string)$content, $userId);
+      } else {
+        $newDocId = DocumentService::createSpreadsheetDocumentFromContents($pdo, $userId, $fileName !== '' ? $fileName : 'Untitled Spreadsheet.xlsx', (string)$content, $userId, 'OFFICIAL');
+        $versionNumber = 1;
+        $docId = $newDocId;
+      }
+      $pdo->commit();
+    } catch (Throwable $e) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      api_json(422, ['message' => $e->getMessage() !== '' ? $e->getMessage() : 'Unable to save spreadsheet version.']);
+    }
+
+    $auditDetails = [];
+    if ($canRenameTitle && $documentTitle !== '') {
+      $auditDetails[] = 'title=' . $documentTitle;
+    }
+    if ($sheetName !== '') {
+      $auditDetails[] = 'sheet=' . $sheetName;
+    }
+    if ($changeSummary !== '') {
+      $auditDetails[] = 'changes=' . $changeSummary;
+    }
+    if (!empty($auditDetails)) {
+      AuditLog::add($pdo, $userId, 'Updated spreadsheet file', $docId, implode(', ', $auditDetails));
+    }
+
+    api_json(200, [
+      'ok' => true,
+      'document_id' => $docId,
+      'version' => $versionNumber,
+      'title_saved' => $canRenameTitle,
+      'document_title' => $savedDocumentTitle,
+    ]);
+  }
+
+  if ($path === '/api/integrations/word/open' && $method === 'POST') {
+    $data = api_input();
+    $docId = (int)($data['document_id'] ?? 0);
+    $launchToken = trim((string)($data['launch_token'] ?? ''));
+
+    if ($docId <= 0 || $launchToken === '') {
+      api_json(422, ['message' => 'Missing document_id or launch_token.']);
+    }
+
+    $tokenPayload = DocumentService::verifyWordLaunchToken($launchToken, $docId);
+    if (!$tokenPayload) {
+      api_json(403, ['message' => 'Invalid or expired launch token.']);
+    }
+
+    $doc = Document::get($pdo, $docId);
+    if (!$doc) {
+      api_json(404, ['message' => 'Document not found.']);
+    }
+
+    $extension = strtolower((string)pathinfo((string)($doc['name'] ?? ''), PATHINFO_EXTENSION));
+    if ($extension !== 'docx') {
+      api_json(422, ['message' => 'Only DOCX files can be edited in the Word editor.']);
+    }
+
+    $latestVersion = Version::latest($pdo, $docId);
+    if (!$latestVersion || trim((string)($latestVersion['file_path'] ?? '')) === '') {
+      api_json(404, ['message' => 'No file version found for this document.']);
+    }
+
+    $content = StorageService::withReadablePath(
+      $pdo,
+      (string)$latestVersion['file_path'],
+      static fn(string $path): string|false => file_get_contents($path)
+    );
+
+    if ($content === false || $content === null) {
+      api_json(500, ['message' => 'Unable to load Word document content.']);
+    }
+
+    $contentHtml = DocumentService::extractDocxHtml((string)$content);
+    if ($contentHtml === '') {
+      $contentHtml = '<p></p>';
+    }
+
+    $userId = max(1, (int)($tokenPayload['user_id'] ?? (int)($doc['owner_id'] ?? 1)));
+    $userLevel = AccessService::level($pdo, $docId, $userId);
+    $readOnly = !AccessService::canEditDocumentRecord($doc, $userLevel);
+    $documentTitle = api_editor_title_clean((string)($doc['title'] ?? ''), 'docx');
+    $displayName = $documentTitle !== ''
+      ? api_editor_file_name($documentTitle, (string)($doc['name'] ?? 'document.docx'), 'docx')
+      : api_editor_file_name((string)($doc['name'] ?? 'document.docx'), 'document.docx', 'docx');
+
+    api_json(200, [
+      'document_id' => $docId,
+      'document_name' => $displayName,
+      'document_title' => $documentTitle,
+      'can_rename_title' => api_can_rename_document_title($doc, $userId),
+      'file_name' => (string)($doc['name'] ?? 'document.docx'),
+      'mime_type' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'content_html' => $contentHtml,
+      'read_only' => $readOnly,
+      'read_only_reason' => $readOnly ? AccessService::editLockReason($doc, $userLevel) : '',
+      'workflow_status' => (string)($doc['routing_status'] ?? 'AVAILABLE'),
+    ]);
+  }
+
+  if ($path === '/api/integrations/word/save' && $method === 'POST') {
+    $data = api_input();
+    $docId = (int)($data['document_id'] ?? 0);
+    $launchToken = trim((string)($data['launch_token'] ?? ''));
+    $contentHtml = trim((string)($data['content_html'] ?? ''));
+    $fileName = trim((string)($data['file_name'] ?? ''));
+    $documentTitle = api_editor_title_clean((string)($data['document_title'] ?? ''), 'docx');
+    $changeSummary = trim((string)($data['change_summary'] ?? ''));
+
+    if ($docId <= 0 || $launchToken === '' || $contentHtml === '') {
+      api_json(422, ['message' => 'Missing document_id, launch_token, or content_html.']);
+    }
+
+    $tokenPayload = DocumentService::verifyWordLaunchToken($launchToken, $docId);
+    if (!$tokenPayload) {
+      api_json(403, ['message' => 'Invalid or expired launch token.']);
+    }
+
+    $doc = Document::get($pdo, $docId);
+    if (!$doc) {
+      api_json(404, ['message' => 'Document not found.']);
+    }
+
+    $userId = max(1, (int)($tokenPayload['user_id'] ?? (int)($doc['owner_id'] ?? 1)));
+    $userLevel = AccessService::level($pdo, $docId, $userId);
+    if (!AccessService::canEditDocumentRecord($doc, $userLevel)) {
+      api_json(403, ['message' => AccessService::editLockReason($doc, $userLevel)]);
+    }
+
+    $extension = strtolower((string)pathinfo((string)($doc['name'] ?? ''), PATHINFO_EXTENSION));
+    if ($extension !== 'docx') {
+      api_json(422, ['message' => 'Only DOCX files can be saved through the Word editor.']);
+    }
+
+    $canRenameTitle = api_can_rename_document_title($doc, $userId);
+    $storedDocumentTitle = api_editor_title_clean((string)($doc['title'] ?? ''), 'docx');
+    if ($storedDocumentTitle === '') {
+      $storedDocumentTitle = api_editor_title_clean((string)pathinfo((string)($doc['name'] ?? 'document.docx'), PATHINFO_FILENAME), 'docx');
+    }
+    $savedDocumentTitle = $canRenameTitle ? $documentTitle : $storedDocumentTitle;
+    $wordDocumentTitle = $canRenameTitle
+      ? ($documentTitle !== '' ? $documentTitle : (string)pathinfo((string)($doc['name'] ?? 'document.docx'), PATHINFO_FILENAME))
+      : ($storedDocumentTitle !== '' ? $storedDocumentTitle : (string)pathinfo((string)($doc['name'] ?? 'document.docx'), PATHINFO_FILENAME));
+
+    try {
+      $contents = DocumentService::createWordDocumentFromHtml(
+        $wordDocumentTitle,
+        $contentHtml
+      );
+    } catch (Throwable $e) {
+      api_json(422, ['message' => $e->getMessage() !== '' ? $e->getMessage() : 'Unable to prepare the Word document.']);
+    }
+
+    $nextFileName = api_editor_file_name($canRenameTitle ? $fileName : (string)($doc['name'] ?? ''), (string)($doc['name'] ?? 'document.docx'), 'docx');
+
+    $pdo->beginTransaction();
+    try {
+      if ($canRenameTitle) {
+        Document::updateTitle($pdo, $docId, $documentTitle !== '' ? $documentTitle : null);
+      }
+      $versionNumber = DocumentService::uploadNewVersionFromContents($pdo, $docId, $nextFileName, $contents, $userId);
+      $pdo->commit();
+    } catch (Throwable $e) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      api_json(422, ['message' => $e->getMessage() !== '' ? $e->getMessage() : 'Unable to save Word document version.']);
+    }
+
+    $auditDetails = [];
+    if ($canRenameTitle && $documentTitle !== '') {
+      $auditDetails[] = 'title=' . $documentTitle;
+    }
+    if ($changeSummary !== '') {
+      $auditDetails[] = 'changes=' . $changeSummary;
+    }
+    if (!empty($auditDetails)) {
+      AuditLog::add($pdo, $userId, 'Updated Word document', $docId, implode(', ', $auditDetails));
+    }
+
+    api_json(200, [
+      'ok' => true,
+      'document_id' => $docId,
+      'version' => $versionNumber,
+      'title_saved' => $canRenameTitle,
+      'document_title' => $savedDocumentTitle,
+    ]);
   }
 
   if ($path === '/api/documents' && $method === 'GET') {
@@ -197,6 +587,11 @@ function api_dispatch(string $method, string $path): bool {
     $uid = (int)$_SESSION['user']['id'];
     $folderId = req_int('folder_id', 0) ?: null;
     $ownerId = api_selected_owner_id($pdo, $uid);
+
+    // Only admin users may upload files via the API
+    if (!in_array(strtoupper((string)($_SESSION['user']['role'] ?? '')), ['SUPER_ADMIN', 'ADMIN'], true)) {
+      api_json(403, ['message' => 'permission_denied']);
+    }
 
     if (!empty($_FILES['file'])) {
       $pdo->beginTransaction();
@@ -231,7 +626,17 @@ function api_dispatch(string $method, string $path): bool {
 
     if ($method === 'PUT') {
       api_require_write_request();
-      api_require_edit($pdo, $docId, $uid);
+      $doc = Document::get($pdo, $docId);
+      if (!$doc) {
+        api_json(404, ['message' => 'Not found']);
+      }
+      if (!api_can_manage_document($doc, $uid)) {
+        api_json(403, ['message' => 'Owner access required']);
+      }
+      $level = AccessService::level($pdo, $docId, $uid);
+      if (!AccessService::canEditDocumentRecord($doc, $level)) {
+        api_json(403, ['message' => AccessService::editLockReason($doc, $level)]);
+      }
       $data = api_input();
       $name = trim((string)($data['name'] ?? ''));
       if ($name === '') {
@@ -270,7 +675,7 @@ function api_dispatch(string $method, string $path): bool {
       api_json(404, ['message' => 'User not found']);
     }
     try {
-      $result = DocumentShareService::shareDocument($pdo, $doc, $uid, $target, trim((string)($data['permission'] ?? 'viewer')));
+      $result = DocumentShareService::shareDocument($pdo, $doc, $uid, $target, 'editor');
     } catch (RuntimeException $e) {
       $error = $e->getMessage();
       $status = match ($error) {
@@ -300,6 +705,8 @@ function api_dispatch(string $method, string $path): bool {
   }
 
   api_json(404, ['message' => 'API route not found']);
+
+  return false;
 }
 
 function api_input(): array {
@@ -317,6 +724,12 @@ function api_input(): array {
   }
 
   return $_POST;
+}
+
+function api_spreadsheet_mime_type(string $extension): string {
+  return strtolower($extension) === 'xls'
+    ? 'application/vnd.ms-excel'
+    : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 }
 
 function api_require_login(): void {
@@ -351,8 +764,7 @@ function api_require_view(PDO $pdo, int $docId, int $userId): void {
 }
 
 function api_require_edit(PDO $pdo, int $docId, int $userId): void {
-  $level = AccessService::level($pdo, $docId, $userId);
-  if (!in_array($level, ['owner', 'editor'], true)) {
+  if (!AccessService::canEditDocument($pdo, $docId, $userId)) {
     api_json(403, ['message' => 'No edit access']);
   }
 }
@@ -379,70 +791,6 @@ function api_public_file_url(string $path): string {
     return $path;
   }
   $clean = '/' . ltrim(str_replace('\\', '/', $path), '/');
-  return wdms_base_url_path($clean);
+  return cddfts_base_url_path($clean);
 }
 
-function api_handle_chat_attachment(?array $file): array {
-  global $pdo;
-
-  if (!$file || empty($file['name'])) {
-    return [];
-  }
-
-  $error = (int)($file['error'] ?? UPLOAD_ERR_NO_FILE);
-  if ($error === UPLOAD_ERR_NO_FILE) {
-    return [];
-  }
-  if ($error !== UPLOAD_ERR_OK) {
-    api_json(422, ['message' => 'Attachment upload failed']);
-  }
-
-  $tmpPath = (string)($file['tmp_name'] ?? '');
-  if ($tmpPath === '' || !is_uploaded_file($tmpPath)) {
-    api_json(422, ['message' => 'Invalid attachment upload']);
-  }
-
-  $size = (int)($file['size'] ?? 0);
-  if ($size <= 0 || $size > 10 * 1024 * 1024) {
-    api_json(422, ['message' => 'Attachment must be less than 10MB']);
-  }
-
-  $originalName = trim((string)($file['name'] ?? ''));
-  $ext = strtolower((string)pathinfo($originalName, PATHINFO_EXTENSION));
-  $allowedExt = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt', 'csv', 'zip', 'rar'];
-  if (!in_array($ext, $allowedExt, true)) {
-    api_json(422, ['message' => 'Unsupported attachment type']);
-  }
-
-  $finfo = finfo_open(FILEINFO_MIME_TYPE);
-  $mime = $finfo ? (string)finfo_file($finfo, $tmpPath) : '';
-  if ($finfo) {
-    finfo_close($finfo);
-  }
-  if ($mime === '') {
-    $mime = (string)($file['type'] ?? 'application/octet-stream');
-  }
-
-  $safeBase = preg_replace('/[^a-zA-Z0-9._-]/', '_', (string)pathinfo($originalName, PATHINFO_FILENAME));
-  $safeBase = trim((string)$safeBase, '._-');
-  if ($safeBase === '') {
-    $safeBase = 'file';
-  }
-  $filename = $safeBase . '_' . bin2hex(random_bytes(6)) . '.' . $ext;
-  $storageKey = 'public/chat/' . $filename;
-  if (!StorageService::storeUploadedFile($pdo, $file, $storageKey, [
-    'kind' => 'chat_attachment',
-    'visibility' => 'private',
-    'original_name' => $originalName,
-    'mime_type' => $mime,
-    'created_by' => (int)($_SESSION['user']['id'] ?? 0),
-  ])) {
-    api_json(500, ['message' => 'Unable to save attachment']);
-  }
-
-  return [
-    'path' => StorageService::publicMediaUrl($storageKey, true),
-    'name' => $originalName,
-    'mime' => $mime,
-  ];
-}

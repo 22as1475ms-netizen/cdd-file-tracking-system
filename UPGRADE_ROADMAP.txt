@@ -1,0 +1,146 @@
+CDD-File-Tracking-System Upgrade Roadmap
+
+This file lists the next architectural and maintenance upgrades that would improve the system beyond its current working state.
+
+1. Storage Upgrade
+
+What it means:
+- Move uploaded document binaries away from database blob fallback storage.
+- Prefer object storage such as Supabase Storage or another S3-compatible backend.
+
+Why it matters:
+- Better scalability for large file counts
+- Better handling for larger files
+- Less pressure on the main MySQL database
+
+Where it affects the code:
+- app/services/StorageService.php
+- app/services/DocumentService.php
+- app/config/app.php
+- DEPLOY_VERCEL.md
+
+2. Dead-Code Cleanup Phase 2
+
+What it means:
+- Review and remove disconnected or abandoned feature files that are not part of the live routed workflow.
+- Example candidate: AdminOrgController and related unfinished organization-management leftovers if they are no longer planned.
+
+Why it matters:
+- Reduces confusion for future programmers
+- Makes maintenance and upgrades safer
+
+Where it affects the code:
+- app/controllers/AdminOrgController.php
+- any related unused views/models/routes
+
+3. Stronger Route/Status Centralization
+
+What it means:
+- Replace repeated raw status strings such as COMPLETED, SHARE_ACCEPTED, IN_REVIEW, and REJECTED with shared constants or helper definitions in one place.
+
+Why it matters:
+- Avoids typo bugs
+- Makes rule changes easier
+- Helps future programmers understand the allowed workflow states
+
+Where it affects the code:
+- app/models/Document.php
+- app/models/DocumentRoute.php
+- app/services/DocumentShareService.php
+- app/services/DocumentReviewService.php
+- controllers and views that check status values
+
+4. Better Admin-User Workspace Aggregation
+
+What it means:
+- Further optimize the admin users page so user workspace summaries do not become expensive when account count and route count grow.
+
+Why it matters:
+- Better performance at larger scale
+- Faster admin workspace browsing
+
+Where it affects the code:
+- app/controllers/AdminController.php
+- app/views/admin/users.php
+- app/models/Document.php
+
+5. Cleaner Database Migration Structure
+
+What it means:
+- Move more schema evolution into cleaner migration steps instead of relying mainly on runtime bootstrap adjustments.
+
+Why it matters:
+- Easier production upgrades
+- Easier rollback planning
+- More predictable deployment behavior
+
+Where it affects the code:
+- app/config/database.php
+- run-migration.php
+- future migration files
+
+6. Intentional Developer Diagnostics
+
+What it means:
+- Replace ad hoc debug scripts with a structured developer/admin diagnostic approach.
+- Keep debugging tools intentional, documented, and access-controlled.
+
+Why it matters:
+- Prevents random debug files from accumulating
+- Makes troubleshooting safer and more repeatable
+
+Where it affects the code:
+- public/index.php
+- admin-only tooling or protected diagnostic pages
+
+7. Stronger Permissions and Workflow Policy Layer
+
+What it means:
+- Centralize permission decisions even more so role behavior is defined in fewer places.
+- Example: who can route, who can complete, who can see completed routes.
+
+Why it matters:
+- Easier future rule changes
+- Less risk of permission drift between controllers/views/services
+
+Where it affects the code:
+- app/services/AccessService.php
+- app/controllers/DocumentController.php
+- app/controllers/DocumentShareController.php
+- app/services/DocumentShareService.php
+
+8. More Test Coverage
+
+What it means:
+- Add focused tests for the workflow paths that are easiest to break.
+
+Recommended areas:
+- section admin to section staff routing
+- route completion visibility
+- dashboard pagination and counts
+- storage driver behavior
+- permission edge cases
+
+Why it matters:
+- Safer upgrades
+- Faster refactoring
+- Better confidence during bug fixes
+
+Where it affects the code:
+- tests/
+
+Suggested Priority
+
+Must Do Next:
+- Storage Upgrade
+- Stronger Route/Status Centralization
+- More Test Coverage
+
+Good To Do Soon:
+- Better Admin-User Workspace Aggregation
+- Dead-Code Cleanup Phase 2
+- Stronger Permissions and Workflow Policy Layer
+
+Future Improvements:
+- Cleaner Database Migration Structure
+- Intentional Developer Diagnostics

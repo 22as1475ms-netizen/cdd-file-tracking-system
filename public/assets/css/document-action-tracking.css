@@ -1,0 +1,71 @@
+/* Document Action Tracking Form styles */
+@import url('https://fonts.googleapis.com/css2?family=Roboto+Slab:wght@400;700&family=Inter:wght@300;400;600&display=swap');
+
+:root{
+  --paper-bg: #fff;
+  --paper-border: #222;
+  --muted:#666;
+}
+
+body{
+  font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;
+  background: #f3f3f3;
+  padding: 24px;
+  color: #111;
+}
+
+.form-sheet{
+  width: 820px;
+  margin: 0 auto;
+  background: var(--paper-bg);
+  border: 1px solid var(--paper-border);
+  padding: 18px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+}
+
+.form-header .org-name{
+  font-weight:700;
+  text-align:center;
+  letter-spacing:0.6px;
+}
+
+.form-header .doc-title{
+  text-align:center;
+  font-size:18px;
+  margin-top:6px;
+  margin-bottom:14px;
+}
+
+.meta-row{display:flex;gap:12px;margin-bottom:10px;align-items:flex-start}
+.meta-col{flex:1}
+.meta-col.small{flex:0 0 110px}
+.meta-col.right{text-align:right}
+.meta-col.full{flex:1 1 100%}
+label{font-size:12px;color:var(--muted);display:block;margin-bottom:4px}
+.field{min-height:28px;border:1px solid #ccc;padding:6px;background:#fafafa}
+.field.wide{min-width:240px}
+.field.full{min-height:36px}
+.field.small{min-width:120px}
+.checkbox{display:inline-block;margin-top:6px}
+
+.routing{margin-top:14px}
+.routing h3{margin:0 0 8px 0;font-size:14px}
+.routing-table{width:100%;border-collapse:collapse;font-size:13px}
+.routing-table thead th{border:1px solid #bbb;padding:8px;background:#f7f7f7;text-align:left}
+.routing-table td{border:1px solid #ddd;padding:8px;vertical-align:top}
+.section-row .section-label{font-weight:600;background:#fff;padding:8px}
+.checkbox-list{display:flex;flex-wrap:wrap;gap:8px}
+.checkbox-list label{display:inline-flex;align-items:center;gap:6px;font-size:12px}
+.smallfield{min-height:36px}
+.actions{color:#222;font-size:13px}
+.signature-row td.sign{padding:12px;font-style:italic}
+.notes{padding:10px;background:#fff}
+.notes-label{font-weight:600;margin-bottom:6px}
+.notes-field{min-height:30px;border-top:1px dashed #ddd;margin-bottom:6px}
+
+.form-footer{display:flex;justify-content:space-between;margin-top:16px;font-size:13px}
+
+@media print{
+  body{background:transparent;padding:0}
+  .form-sheet{box-shadow:none;border:none;margin:0;width:100%;padding:6mm}
+}

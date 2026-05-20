@@ -9,8 +9,10 @@
     </div>
   </div>
 
-  <?php if(!empty($profileMsg)): ?><div class="alert alert-success"><?= e($profileMsg) ?></div><?php endif; ?>
-  <?php if(!empty($profileError)): ?><div class="alert alert-danger"><?= e($profileError) ?></div><?php endif; ?>
+  <?php if(!empty($profileMsg)): ?><div class="alert alert-success auto-dismiss"><?= e($profileMsg) ?></div><?php endif; ?>
+  <?php if((($_GET['msg'] ?? '') === 'updated') && empty($profileMsg)): ?><div class="alert alert-success auto-dismiss">Profile updated.</div><?php endif; ?>
+  <?php if(!empty($profileError)): ?><div class="alert alert-danger auto-dismiss"><?= e($profileError) ?></div><?php endif; ?>
+  <?php if (!empty($forceChange)): ?><div class="alert alert-warning">Your account is still using the default password. Change it now before continuing to the rest of the workspace.</div><?php endif; ?>
 
   <?php $profileName = (string)($currentUser['name'] ?? ($_SESSION['user']['name'] ?? '')); ?>
   <?php $profileInitials = avatar_initials($profileName); ?>
@@ -57,15 +59,33 @@
     </div>
   </form>
 
-  <?php if(!empty($msg)): ?><div class="alert alert-success"><?= e($msg) ?></div><?php endif; ?>
-  <?php if(!empty($error)): ?><div class="alert alert-danger"><?= e($error) ?></div><?php endif; ?>
+  <?php if(!empty($msg)): ?><div class="alert alert-success auto-dismiss"><?= e($msg) ?></div><?php endif; ?>
+  <?php if(!empty($error)): ?><div class="alert alert-danger auto-dismiss"><?= e($error) ?></div><?php endif; ?>
 
   <form method="POST" class="drive-form-stack" id="account-password-form">
     <?= csrf_field() ?>
     <input type="hidden" name="form_action" value="password">
-    <input class="form-control drive-input" type="password" name="current_password" placeholder="Current password" required>
-    <input class="form-control drive-input" type="password" name="new_password" placeholder="New password" required minlength="8" autocomplete="new-password">
-    <input class="form-control drive-input" type="password" name="new_password_confirm" placeholder="Confirm new password" required minlength="8" autocomplete="new-password">
+    <label class="auth-form__label">
+      <span>Current password</span>
+      <span class="auth-password-field">
+        <input class="form-control drive-input auth-password-field__input" type="password" name="current_password" placeholder="Current password" required data-password-input>
+        <button type="button" class="auth-password-field__toggle" data-password-toggle aria-label="Show current password" aria-pressed="false"><span>Show</span></button>
+      </span>
+    </label>
+    <label class="auth-form__label">
+      <span>New password</span>
+      <span class="auth-password-field">
+        <input class="form-control drive-input auth-password-field__input" type="password" name="new_password" placeholder="New password" required minlength="8" autocomplete="new-password" data-password-input>
+        <button type="button" class="auth-password-field__toggle" data-password-toggle aria-label="Show new password" aria-pressed="false"><span>Show</span></button>
+      </span>
+    </label>
+    <label class="auth-form__label">
+      <span>Confirm new password</span>
+      <span class="auth-password-field">
+        <input class="form-control drive-input auth-password-field__input" type="password" name="new_password_confirm" placeholder="Confirm new password" required minlength="8" autocomplete="new-password" data-password-input>
+        <button type="button" class="auth-password-field__toggle" data-password-toggle aria-label="Show confirm password" aria-pressed="false"><span>Show</span></button>
+      </span>
+    </label>
     <div class="password-health" id="password-health" aria-live="polite">
       <div class="password-health__bar" aria-hidden="true">
         <span class="password-health__fill" id="password-health-fill"></span>
@@ -89,6 +109,8 @@
     const currentInput = form.querySelector('input[name="current_password"]');
     const nextInput = form.querySelector('input[name="new_password"]');
     const confirmInput = form.querySelector('input[name="new_password_confirm"]');
+    const passwordInputs = Array.from(form.querySelectorAll('[data-password-input]'));
+    const toggleButtons = Array.from(form.querySelectorAll('[data-password-toggle]'));
     const fill = document.getElementById('password-health-fill');
     const summary = document.getElementById('password-health-summary');
     const submitButton = document.getElementById('account-password-submit');
@@ -146,7 +168,120 @@
       input.addEventListener('input', updateState);
     });
 
+    toggleButtons.forEach(function (button, index) {
+      const input = passwordInputs[index];
+      if (!button || !input) {
+        return;
+      }
+
+      button.addEventListener('click', function () {
+        const showing = input.type === 'text';
+        input.type = showing ? 'password' : 'text';
+        button.setAttribute('aria-pressed', String(!showing));
+        button.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+        button.querySelector('span').textContent = showing ? 'Show' : 'Hide';
+      });
+    });
+
     updateState();
+  });
+</script>
+
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+    const avatarShell = document.querySelector('.profile-avatar-editor__avatar');
+    const fileInput = document.getElementById('profile-avatar-upload');
+    const nameInput = document.querySelector('input[name="name"]');
+    const presetRadios = Array.from(document.querySelectorAll('.avatar-preset-radio'));
+    if (!avatarShell) return;
+
+    const PRESETS = ['preset-ocean','preset-sunset','preset-forest','preset-plum','preset-slate','preset-amber'];
+
+    function computeInitials(name) {
+      const src = String(name || '').trim();
+      if (!src) return 'U';
+      const parts = src.split(/\s+/).filter(Boolean);
+      const first = parts[0] ? parts[0].charAt(0).toUpperCase() : '';
+      const second = parts.length > 1 ? parts[1].charAt(0).toUpperCase() : '';
+      return (first + second) || 'U';
+    }
+
+    function setPresetClass(preset) {
+      avatarShell.classList.remove(...PRESETS);
+      if (preset && PRESETS.includes(preset)) {
+        avatarShell.classList.add(preset);
+      }
+      // also update header avatar preset class
+      const headerAvatar = document.querySelector('.app-user-pill--button .app-user-pill__avatar');
+      if (headerAvatar) {
+        headerAvatar.classList.remove(...PRESETS);
+        if (preset && PRESETS.includes(preset)) headerAvatar.classList.add(preset);
+      }
+    }
+
+    function showInitials() {
+      const badge = avatarShell.querySelector('.profile-avatar-editor__badge');
+      const img = avatarShell.querySelector('img');
+      if (img) img.remove();
+      const initials = computeInitials(nameInput ? nameInput.value : '');
+      avatarShell.textContent = initials;
+      if (badge) avatarShell.appendChild(badge);
+      // update header initials
+      const headerAvatar = document.querySelector('.app-user-pill--button .app-user-pill__avatar');
+      if (headerAvatar) {
+        const headerBadge = headerAvatar.querySelector('img');
+        if (headerBadge) headerBadge.remove();
+        headerAvatar.textContent = initials;
+      }
+    }
+
+    function showImageSrc(src, alt) {
+      const badge = avatarShell.querySelector('.profile-avatar-editor__badge');
+      avatarShell.textContent = '';
+      const img = document.createElement('img');
+      img.src = src;
+      img.alt = alt || '';
+      avatarShell.appendChild(img);
+      if (badge) avatarShell.appendChild(badge);
+      // also update header image
+      const headerAvatar = document.querySelector('.app-user-pill--button .app-user-pill__avatar');
+      if (headerAvatar) {
+        // remove existing content and add img
+        headerAvatar.textContent = '';
+        const himg = document.createElement('img');
+        himg.src = src;
+        himg.alt = alt || '';
+        headerAvatar.appendChild(himg);
+      }
+    }
+
+    const initialPreset = (document.querySelector('.avatar-preset-radio:checked') || {}).value || <?= json_encode($profilePreset) ?>;
+    setPresetClass(initialPreset);
+
+    fileInput && fileInput.addEventListener('change', function () {
+      const f = this.files && this.files[0];
+      if (!f) {
+        showInitials();
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = function (ev) {
+        showImageSrc(ev.target.result, nameInput ? nameInput.value : '');
+      };
+      reader.readAsDataURL(f);
+    });
+
+    nameInput && nameInput.addEventListener('input', function () {
+      if (!avatarShell.querySelector('img')) {
+        showInitials();
+      }
+    });
+
+    presetRadios.forEach(function (r) {
+      r.addEventListener('change', function () {
+        if (this.checked) setPresetClass(this.value);
+      });
+    });
   });
 </script>
 

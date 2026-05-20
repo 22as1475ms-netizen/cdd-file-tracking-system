@@ -61,6 +61,13 @@ class Document {
     $pdo->prepare("UPDATE documents SET name=? WHERE id=?")->execute([$name, $id]);
   }
 
+  public static function updateTitle(PDO $pdo, int $id, ?string $title): void {
+    $pdo->prepare("UPDATE documents SET title=? WHERE id=?")->execute([
+      self::cleanText($title, 255),
+      $id
+    ]);
+  }
+
   public static function updateMetadata(PDO $pdo, int $id, array $data): void {
     $pdo->prepare("
       UPDATE documents
@@ -112,6 +119,19 @@ class Document {
       SET route_outcome=?, route_closed_at=NOW()
       WHERE id=?
     ")->execute([self::normalizeRouteOutcome($outcome), $id]);
+  }
+
+  public static function completeRouteLifecycle(PDO $pdo, int $id, string $currentLocation = 'Admin'): void {
+    $pdo->prepare("
+      UPDATE documents
+      SET current_location = ?, routing_status = 'COMPLETED', route_outcome = 'COMPLETED', route_closed_at = NOW(),
+          assigned_reviewer_id = NULL, review_acceptance_status = 'NOT_SENT',
+          review_accepted_at = NULL, review_declined_at = NULL, review_acceptance_note = NULL
+      WHERE id = ?
+    ")->execute([
+      self::cleanText($currentLocation, 180) ?? 'Admin',
+      $id,
+    ]);
   }
 
   public static function moveToStorageArea(PDO $pdo, int $id, string $storageArea, ?int $folderId, ?int $divisionId = null): void {
@@ -167,10 +187,14 @@ class Document {
 
   public static function get(PDO $pdo, int $id): ?array {
     $s = $pdo->prepare("
-      SELECT d.*, u.name owner_name, u.email owner_email, u.division_id owner_division_id, dv.name division_name
+      SELECT d.*, u.name owner_name, u.email owner_email, u.division_id owner_division_id, dv.name division_name,
+             reviewer.name assigned_reviewer_name, reviewer.email assigned_reviewer_email,
+             rs.name review_section_name
       FROM documents d
       JOIN users u ON u.id=d.owner_id
       LEFT JOIN divisions dv ON dv.id = d.division_id
+      LEFT JOIN users reviewer ON reviewer.id = d.assigned_reviewer_id
+      LEFT JOIN sections rs ON rs.id = d.review_section_id
       WHERE d.id=? LIMIT 1
     ");
     $s->execute([$id]);
@@ -233,6 +257,190 @@ class Document {
 
     $s->execute($params);
     return array_map(static fn(array $row): string => (string)$row['name'], $s->fetchAll());
+  }
+
+  public static function listRoutedToUser(
+    PDO $pdo,
+    int $userId,
+    string $userName,
+    int $page = 1,
+    int $perPage = 25,
+    string $search = '',
+    array $routeStates = []
+  ): array {
+    // Central routed-inbox query for both staff and admin views.
+    // Keep this paged and join-based: the older per-row subquery pattern becomes
+    // expensive quickly once route history and permissions grow.
+    $page = max(1, $page);
+    $perPage = (int)$perPage;
+    $params = [$userId];
+    $params = array_merge($params, self::routedScopeParams($userId, $userName));
+    $searchSql = self::buildSearchSql($search, $params);
+    $routeStateSql = self::buildRoutedStateFilterSql($routeStates, $params);
+    $routeStateExpr = self::routedRouteStateExpr();
+
+    $sql = "
+      SELECT
+        d.id,
+        d.owner_id,
+        d.folder_id,
+        d.name,
+        d.storage_area,
+        d.status,
+        d.document_code,
+        d.document_date,
+        d.title,
+        d.document_type,
+        d.signatory,
+        d.routing_status,
+        d.route_outcome,
+        d.route_closed_at,
+        d.priority_level,
+        d.current_location,
+        d.review_stage,
+        d.review_acceptance_status,
+        d.assigned_reviewer_id,
+        d.created_at,
+        owner.name AS owner_name,
+        owner.email AS owner_email,
+        owner.role AS owner_role,
+        owner_division.name AS division_name,
+        p_user.permission,
+        p_user.shared_by,
+        p_user.accepted_at,
+        p_user.declined_at,
+        p_user.response_note,
+        shared_by_user.name AS shared_by_name,
+        shared_by_user.email AS shared_by_email,
+        active_recipient_user.name AS active_recipient_name,
+        active_recipient_user.role AS active_recipient_role,
+        active_recipient_division.name AS active_recipient_division_name,
+        latest_route.from_location AS last_route_from,
+        latest_route.to_location AS last_route_to,
+        latest_route.note AS last_route_note,
+        latest_route.routed_at AS last_route_at,
+        latest_route_user.name AS last_route_by_name,
+        {$routeStateExpr} AS route_state
+      FROM documents d
+      JOIN users owner ON owner.id = d.owner_id
+      LEFT JOIN divisions owner_division ON owner_division.id = d.division_id
+      LEFT JOIN permissions p_user ON p_user.document_id = d.id AND p_user.user_id = ?
+      LEFT JOIN users shared_by_user ON shared_by_user.id = p_user.shared_by
+      " . self::latestAcceptedPermissionJoinSql() . "
+      LEFT JOIN users active_recipient_user ON active_recipient_user.id = active_recipient.user_id
+      LEFT JOIN divisions active_recipient_division ON active_recipient_division.id = active_recipient_user.division_id
+      " . self::latestRouteJoinSql() . "
+      LEFT JOIN users latest_route_user ON latest_route_user.id = latest_route.routed_by
+      WHERE " . self::routedScopeWhereSql() . "
+      {$searchSql}
+      {$routeStateSql}
+      ORDER BY COALESCE(latest_route.routed_at, p_user.accepted_at, p_user.declined_at, d.created_at) DESC, d.id DESC
+    ";
+
+    if ($perPage > 0) {
+      $offset = ($page - 1) * $perPage;
+      $sql .= " LIMIT " . (int)$perPage . " OFFSET " . (int)$offset;
+    }
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $rows = $stmt->fetchAll();
+
+    $countParams = [$userId];
+    $countParams = array_merge($countParams, self::routedScopeParams($userId, $userName));
+    $countSearchSql = self::buildSearchSql($search, $countParams);
+    $countRouteStateSql = self::buildRoutedStateFilterSql($routeStates, $countParams);
+    $countStmt = $pdo->prepare("
+      SELECT COUNT(*)
+      FROM documents d
+      LEFT JOIN permissions p_user ON p_user.document_id = d.id AND p_user.user_id = ?
+      WHERE " . self::routedScopeWhereSql() . "
+      {$countSearchSql}
+      {$countRouteStateSql}
+    ");
+    $countStmt->execute($countParams);
+    $total = (int)$countStmt->fetchColumn();
+
+    return [$rows, $total];
+  }
+
+  public static function summarizeRoutedToUser(PDO $pdo, int $userId, string $userName): array {
+    // Summary counts are computed separately from the paged list so dashboards
+    // can stay fast without loading every routed document into PHP first.
+    $params = [$userId];
+    $params = array_merge($params, self::routedScopeParams($userId, $userName));
+    $routeStateExpr = self::routedRouteStateExpr();
+
+    $stmt = $pdo->prepare("
+      SELECT
+        COUNT(*) AS total_count,
+        SUM(CASE WHEN {$routeStateExpr} IN ('ROUTED', 'UNDER_REVIEW') THEN 1 ELSE 0 END) AS incoming_count,
+        SUM(CASE WHEN {$routeStateExpr} = 'COMPLETED' THEN 1 ELSE 0 END) AS completed_count,
+        SUM(CASE WHEN {$routeStateExpr} = 'UNDER_REVIEW' THEN 1 ELSE 0 END) AS under_review_count,
+        SUM(CASE
+          WHEN {$routeStateExpr} IN ('ROUTED', 'UNDER_REVIEW')
+            AND UPPER(COALESCE(d.priority_level, 'MODERATE')) IN ('HIGH', 'RUSH', 'URGENT')
+          THEN 1 ELSE 0 END
+        ) AS priority_count
+      FROM documents d
+      LEFT JOIN permissions p_user ON p_user.document_id = d.id AND p_user.user_id = ?
+      WHERE " . self::routedScopeWhereSql() . "
+    ");
+    $stmt->execute($params);
+    $row = $stmt->fetch() ?: [];
+
+    return [
+      'total' => (int)($row['total_count'] ?? 0),
+      'incoming' => (int)($row['incoming_count'] ?? 0),
+      'completed' => (int)($row['completed_count'] ?? 0),
+      'under_review' => (int)($row['under_review_count'] ?? 0),
+      'priority' => (int)($row['priority_count'] ?? 0),
+    ];
+  }
+
+  public static function summarizeOwnerQueue(PDO $pdo, int $ownerId, string $search = ''): array {
+    $params = [$ownerId];
+    $searchSql = self::buildSearchSql($search, $params);
+    $stmt = $pdo->prepare("
+      SELECT
+        COUNT(*) AS total_count,
+        SUM(CASE WHEN UPPER(COALESCE(d.routing_status, 'NOT_ROUTED')) IN ('NOT_ROUTED', 'AVAILABLE') THEN 1 ELSE 0 END) AS waiting_count,
+        SUM(CASE WHEN UPPER(COALESCE(d.routing_status, 'NOT_ROUTED')) IN ('SHARE_DECLINED', 'REVIEW_ASSIGNMENT_DECLINED', 'REJECTED') THEN 1 ELSE 0 END) AS returned_count,
+        SUM(CASE WHEN UPPER(COALESCE(d.routing_status, 'NOT_ROUTED')) IN ('APPROVED', 'COMPLETED') THEN 1 ELSE 0 END) AS approved_count,
+        SUM(CASE
+          WHEN UPPER(COALESCE(d.routing_status, 'NOT_ROUTED')) NOT IN ('NOT_ROUTED', 'AVAILABLE', 'SHARE_DECLINED', 'REVIEW_ASSIGNMENT_DECLINED', 'REJECTED', 'APPROVED', 'COMPLETED')
+          THEN 1 ELSE 0 END
+        ) AS routed_count
+      FROM documents d
+      WHERE d.storage_area = 'OFFICIAL' AND d.deleted_at IS NULL AND d.owner_id = ?
+      {$searchSql}
+    ");
+    $stmt->execute($params);
+    $row = $stmt->fetch() ?: [];
+
+    return [
+      'total' => (int)($row['total_count'] ?? 0),
+      'waiting' => (int)($row['waiting_count'] ?? 0),
+      'returned' => (int)($row['returned_count'] ?? 0),
+      'approved' => (int)($row['approved_count'] ?? 0),
+      'routed' => (int)($row['routed_count'] ?? 0),
+    ];
+  }
+
+  public static function searchActiveForOwnerInStorage(PDO $pdo, int $ownerId, string $storageArea, string $search, int $limit = 10): array {
+    $limit = max(1, $limit);
+    $params = [$ownerId, self::normalizeStorageArea($storageArea)];
+    $searchSql = self::buildSearchSql($search, $params);
+    $stmt = $pdo->prepare("
+      SELECT d.*
+      FROM documents d
+      WHERE d.owner_id = ? AND d.storage_area = ? AND d.deleted_at IS NULL
+      {$searchSql}
+      ORDER BY COALESCE(d.document_date, DATE(d.created_at)) DESC, d.id DESC
+      LIMIT {$limit}
+    ");
+    $stmt->execute($params);
+    return $stmt->fetchAll();
   }
 
   public static function listMy(PDO $pdo, int $userId, string $search, ?int $folderId, int $page, int $per, bool $trash=false, array $filters = []): array {
@@ -369,15 +577,15 @@ class Document {
   }
 
   public static function listForDivisionChief(PDO $pdo, int $divisionId, int $reviewerUserId, array $filters = []): array {
-    $params = [$divisionId, $reviewerUserId, $reviewerUserId];
     $where = "
       d.division_id=? AND d.storage_area='OFFICIAL' AND d.deleted_at IS NULL
       AND (
-        d.review_acceptance_status IN ('PENDING', 'ACCEPTED')
+        d.assigned_reviewer_id=?
         OR d.reviewed_by=?
         OR (d.status IN ('Approved', 'Rejected') AND d.reviewed_by=?)
       )
     ";
+    $params = [$divisionId, $reviewerUserId, $reviewerUserId, $reviewerUserId];
     $status = trim((string)($filters['status'] ?? ''));
     if ($status !== '') {
       $where .= " AND d.status = ? ";
@@ -517,15 +725,16 @@ class Document {
       ->execute([$id]);
   }
 
-  public static function submitForReview(PDO $pdo, int $id, int $divisionId): void {
+  public static function submitForReview(PDO $pdo, int $id, int $divisionId, int $sectionId, int $reviewerId): void {
     $pdo->prepare("
       UPDATE documents
       SET storage_area='OFFICIAL', division_id=?, status='To be reviewed', submitted_at=NOW(),
           approval_locked=1, checked_out_by=NULL, checked_out_at=NULL, review_note=NULL,
           review_acceptance_status='PENDING', review_accepted_at=NULL, review_declined_at=NULL,
-          review_acceptance_note=NULL
+          review_acceptance_note=NULL, review_stage='SECTION_REVIEW', review_section_id=?,
+          assigned_reviewer_id=?, review_escalated_at=NULL
       WHERE id=?
-    ")->execute([$divisionId, $id]);
+    ")->execute([$divisionId, $sectionId, $reviewerId, $id]);
   }
 
   public static function acceptReviewAssignment(PDO $pdo, int $id): void {
@@ -544,6 +753,16 @@ class Document {
     ")->execute([self::cleanText($note, 1000), $id]);
   }
 
+  public static function escalateReview(PDO $pdo, int $id, int $divisionReviewerId, ?string $note): void {
+    $pdo->prepare("
+      UPDATE documents
+      SET review_stage='DIVISION_REVIEW', assigned_reviewer_id=?, review_acceptance_status='PENDING',
+          review_accepted_at=NULL, review_declined_at=NULL, review_acceptance_note=?,
+          review_escalated_at=NOW()
+      WHERE id=?
+    ")->execute([$divisionReviewerId, self::cleanText($note, 1000), $id]);
+  }
+
   public static function finalizeReview(PDO $pdo, int $id, string $decision, ?string $note, int $reviewerId): void {
     $status = strtoupper($decision) === 'APPROVED' ? 'Approved' : 'Rejected';
     $locked = $status === 'Approved' ? 1 : 0;
@@ -552,7 +771,7 @@ class Document {
       UPDATE documents
       SET status=?, review_note=?, reviewed_by=?, reviewed_at=NOW(), approval_locked=?,
           checked_out_by=NULL, checked_out_at=NULL, review_acceptance_status='ACCEPTED',
-          document_type=?
+          document_type=?, review_stage='FINAL', assigned_reviewer_id=NULL
       WHERE id=?
     ")->execute([$status, $note, $reviewerId, $locked, $documentType, $id]);
   }
@@ -589,9 +808,6 @@ class Document {
         d.submitted_at,
         d.reviewed_at,
         f.name AS folder_name,
-        COALESCE((SELECT MAX(dv.version_number) FROM document_versions dv WHERE dv.document_id = d.id), 0) AS latest_version,
-        COALESCE((SELECT COUNT(*) FROM document_versions dv WHERE dv.document_id = d.id), 0) AS version_count,
-        COALESCE((SELECT COUNT(*) FROM permissions p WHERE p.document_id = d.id), 0) AS shared_count,
         (SELECT ru.name FROM document_routes dr JOIN users ru ON ru.id = dr.routed_by WHERE dr.document_id = d.id ORDER BY dr.routed_at DESC, dr.id DESC LIMIT 1) AS last_touched_by_name,
         COALESCE((SELECT MAX(dv.created_at) FROM document_versions dv WHERE dv.document_id = d.id), d.reviewed_at, d.submitted_at, d.created_at) AS last_activity_at
       FROM documents d
@@ -735,8 +951,32 @@ class Document {
     $params[] = $like;
     $params[] = $like;
 
+    $fullTextSql = '';
+    if (self::documentFullTextAvailable()) {
+      // Prefer FULLTEXT when available, but keep LIKE fallbacks so local/test
+      // environments still work even if the fulltext index has not been created yet.
+      $booleanQuery = self::buildBooleanSearchQuery($term);
+      if ($booleanQuery !== '') {
+        array_pop($params);
+        array_pop($params);
+        array_pop($params);
+        array_pop($params);
+        array_pop($params);
+        array_pop($params);
+        $params[] = $booleanQuery;
+        $params[] = $like;
+        $params[] = $like;
+        $params[] = $like;
+        $params[] = $like;
+        $params[] = $like;
+        $params[] = $like;
+        $fullTextSql = "MATCH(d.name, d.title, d.document_code, d.current_location, d.signatory, d.tags) AGAINST (? IN BOOLEAN MODE) OR ";
+      }
+    }
+
     return "
       AND (
+        {$fullTextSql}
         d.name LIKE ?
         OR COALESCE(d.title, '') LIKE ?
         OR COALESCE(d.document_code, '') LIKE ?
@@ -744,6 +984,159 @@ class Document {
         OR COALESCE(d.signatory, '') LIKE ?
         OR COALESCE(d.tags, '') LIKE ?
       )
+    ";
+  }
+
+  private static function buildBooleanSearchQuery(string $search): string {
+    $parts = preg_split('/\s+/', trim($search)) ?: [];
+    $tokens = [];
+
+    foreach ($parts as $part) {
+      $clean = preg_replace('/[^\pL\pN_-]+/u', '', $part);
+      if ($clean === null) {
+        continue;
+      }
+      $clean = trim($clean);
+      if (mb_strlen($clean) < 2) {
+        continue;
+      }
+      $tokens[] = '+' . $clean . (mb_strlen($clean) >= 3 ? '*' : '');
+    }
+
+    return implode(' ', array_slice(array_values(array_unique($tokens)), 0, 8));
+  }
+
+  private static function documentFullTextAvailable(): bool {
+    if (function_exists('cddfts_document_fulltext_enabled') && !cddfts_document_fulltext_enabled()) {
+      return false;
+    }
+
+    static $available = null;
+    if ($available !== null) {
+      return $available;
+    }
+
+    $pdo = $GLOBALS['pdo'] ?? null;
+    if (!$pdo instanceof PDO) {
+      $available = false;
+      return $available;
+    }
+
+    try {
+      $stmt = $pdo->prepare("
+        SELECT COUNT(*)
+        FROM information_schema.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'documents'
+          AND INDEX_NAME = 'ft_documents_search'
+      ");
+      $stmt->execute();
+      $available = (int)$stmt->fetchColumn() > 0;
+    } catch (Throwable $_e) {
+      $available = false;
+    }
+
+    return $available;
+  }
+
+  private static function routedScopeParams(int $userId, string $userName): array {
+    $sharedLocation = 'Shared with ' . trim($userName);
+    return [$userId, $sharedLocation, '%' . trim($userName) . '%'];
+  }
+
+  private static function routedScopeWhereSql(): string {
+    // A routed document is visible to a user if they have an explicit permission,
+    // are the assigned reviewer, or were named in route history/location notes.
+    // Keep this scope definition shared so staff/admin routed views do not drift.
+    return "
+      d.deleted_at IS NULL
+      AND (
+        p_user.user_id IS NOT NULL
+        OR d.assigned_reviewer_id = ?
+        OR EXISTS (
+          SELECT 1
+          FROM document_routes route_match
+          WHERE route_match.document_id = d.id
+            AND (
+              route_match.to_location = ?
+              OR route_match.note LIKE ?
+            )
+        )
+      )
+    ";
+  }
+
+  private static function routedRouteStateExpr(): string {
+    return "
+      CASE
+        WHEN UPPER(COALESCE(d.route_outcome, 'ACTIVE')) = 'COMPLETED'
+          OR UPPER(COALESCE(d.routing_status, 'AVAILABLE')) = 'COMPLETED'
+        THEN 'COMPLETED'
+        WHEN UPPER(COALESCE(d.routing_status, 'AVAILABLE')) IN ('IN_REVIEW', 'PENDING_REVIEW_ACCEPTANCE')
+          OR UPPER(COALESCE(d.review_acceptance_status, 'NOT_SENT')) = 'ACCEPTED'
+        THEN 'UNDER_REVIEW'
+        WHEN UPPER(COALESCE(d.routing_status, 'AVAILABLE')) IN ('REJECTED', 'SHARE_DECLINED', 'REVIEW_ASSIGNMENT_DECLINED')
+        THEN 'RETURNED'
+        ELSE 'ROUTED'
+      END
+    ";
+  }
+
+  private static function buildRoutedStateFilterSql(array $routeStates, array &$params): string {
+    $normalized = array_values(array_filter(array_map(
+      static fn(mixed $state): string => strtoupper(trim((string)$state)),
+      $routeStates
+    )));
+    if (empty($normalized)) {
+      return '';
+    }
+
+    $placeholders = implode(', ', array_fill(0, count($normalized), '?'));
+    foreach ($normalized as $state) {
+      $params[] = $state;
+    }
+
+    return " AND " . self::routedRouteStateExpr() . " IN ({$placeholders}) ";
+  }
+
+  private static function latestRouteJoinSql(): string {
+    // Resolve the latest route row once and join it, instead of asking for the
+    // latest route fields through separate subqueries per selected column.
+    return "
+      LEFT JOIN (
+        SELECT dr.document_id, dr.from_location, dr.to_location, dr.note, dr.routed_at, dr.routed_by
+        FROM document_routes dr
+        INNER JOIN (
+          SELECT document_id, MAX(id) AS latest_id
+          FROM document_routes
+          GROUP BY document_id
+        ) latest_route_index ON latest_route_index.latest_id = dr.id
+      ) latest_route ON latest_route.document_id = d.id
+    ";
+  }
+
+  private static function latestAcceptedPermissionJoinSql(): string {
+    // This join gives us the current accepted recipient without loading the whole
+    // permission history into PHP.
+    return "
+      LEFT JOIN (
+        SELECT p.document_id, p.user_id, p.accepted_at
+        FROM permissions p
+        INNER JOIN (
+          SELECT document_id, accepted_at, MAX(id) AS latest_id
+          FROM permissions
+          WHERE accepted_at IS NOT NULL
+          GROUP BY document_id, accepted_at
+        ) accepted_perm_index ON accepted_perm_index.latest_id = p.id
+        INNER JOIN (
+          SELECT document_id, MAX(accepted_at) AS latest_accepted_at
+          FROM permissions
+          WHERE accepted_at IS NOT NULL
+          GROUP BY document_id
+        ) accepted_perm_time
+          ON accepted_perm_time.document_id = p.document_id
+         AND accepted_perm_time.latest_accepted_at = p.accepted_at
+      ) active_recipient ON active_recipient.document_id = d.id
     ";
   }
 
@@ -761,6 +1154,7 @@ class Document {
       'REVIEW_ASSIGNMENT_DECLINED' => 'REVIEW_ASSIGNMENT_DECLINED',
       'APPROVED' => 'APPROVED',
       'REJECTED' => 'REJECTED',
+      'COMPLETED' => 'COMPLETED',
       default => 'AVAILABLE',
     };
   }
@@ -770,6 +1164,7 @@ class Document {
       'APPROVED' => 'APPROVED',
       'RETURNED' => 'RETURNED',
       'REJECTED' => 'REJECTED',
+      'COMPLETED' => 'COMPLETED',
       'ARCHIVED' => 'ARCHIVED',
       default => 'ACTIVE',
     };
@@ -778,9 +1173,10 @@ class Document {
   public static function normalizePriorityLevel(string $value): string {
     return match (strtoupper(trim($value))) {
       'LOW' => 'LOW',
+      'MODERATE', 'NORMAL' => 'MODERATE',
       'HIGH' => 'HIGH',
-      'URGENT' => 'URGENT',
-      default => 'NORMAL',
+      'RUSH', 'URGENT' => 'RUSH',
+      default => 'MODERATE',
     };
   }
 

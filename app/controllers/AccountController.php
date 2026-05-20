@@ -78,6 +78,7 @@ function account_password(): void {
   $profileError = null;
   $profileMsg = null;
   $currentUser = User::findById($pdo, $uid);
+  $forceChange = req_str('force_change', '') === '1';
 
   if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_verify();
@@ -85,46 +86,50 @@ function account_password(): void {
     $u = User::findById($pdo, $uid);
 
     if ($action === 'profile') {
-      $newName = trim(req_str('name', ''));
-      $selectedPreset = req_str('avatar_preset', 'preset-ocean');
-      $usePreset = req_str('use_preset', '') === '1';
-      if (!in_array($selectedPreset, account_avatar_presets(), true)) {
-        $selectedPreset = 'preset-ocean';
-      }
-      $uploadedPath = account_avatar_upload($_FILES['avatar_photo'] ?? [], $uid);
-      if ($newName === '') {
-        $profileError = 'Name is required.';
-      } elseif (mb_strlen($newName) > 120) {
-        $profileError = 'Name is too long.';
+      if ($forceChange) {
+        $profileError = 'Please change your password before updating profile settings.';
       } else {
-        User::updateName($pdo, $uid, $newName);
-        $nextPhoto = $uploadedPath ?? (string)($u['avatar_photo'] ?? '');
-        if ($usePreset) {
-          $nextPhoto = '';
+        $newName = trim(req_str('name', ''));
+        $selectedPreset = req_str('avatar_preset', 'preset-ocean');
+        $usePreset = req_str('use_preset', '') === '1';
+        if (!in_array($selectedPreset, account_avatar_presets(), true)) {
+          $selectedPreset = 'preset-ocean';
         }
-        if ($uploadedPath !== null || $usePreset) {
-          $oldPhoto = trim((string)($u['avatar_photo'] ?? ''));
-          if ($oldPhoto !== '') {
-            $oldKey = account_avatar_storage_key($oldPhoto);
-            if ($oldKey !== null) {
-              StorageService::delete($pdo, $oldKey);
-            } elseif (str_starts_with($oldPhoto, '/uploads/avatars/')) {
-              $oldAbs = wdms_public_path(ltrim($oldPhoto, '/'));
-              if (is_file($oldAbs)) {
-                @unlink($oldAbs);
+        $uploadedPath = account_avatar_upload($_FILES['avatar_photo'] ?? [], $uid);
+        if ($newName === '') {
+          $profileError = 'Name is required.';
+        } elseif (mb_strlen($newName) > 120) {
+          $profileError = 'Name is too long.';
+        } else {
+          User::updateName($pdo, $uid, $newName);
+          $nextPhoto = $uploadedPath ?? (string)($u['avatar_photo'] ?? '');
+          if ($usePreset) {
+            $nextPhoto = '';
+          }
+          if ($uploadedPath !== null || $usePreset) {
+            $oldPhoto = trim((string)($u['avatar_photo'] ?? ''));
+            if ($oldPhoto !== '') {
+              $oldKey = account_avatar_storage_key($oldPhoto);
+              if ($oldKey !== null) {
+                StorageService::delete($pdo, $oldKey);
+              } elseif (str_starts_with($oldPhoto, '/uploads/avatars/')) {
+                $oldAbs = cddfts_public_path(ltrim($oldPhoto, '/'));
+                if (is_file($oldAbs)) {
+                  @unlink($oldAbs);
+                }
               }
             }
           }
+          User::updateAvatar($pdo, $uid, $nextPhoto !== '' ? $nextPhoto : null, $selectedPreset);
+          if (isset($_SESSION['user']) && is_array($_SESSION['user'])) {
+            $_SESSION['user']['name'] = $newName;
+            $_SESSION['user']['avatar_photo'] = $nextPhoto !== '' ? $nextPhoto : null;
+            $_SESSION['user']['avatar_preset'] = $selectedPreset;
+          }
+          AuditLog::add($pdo, $uid, "Updated profile settings", null, null);
+          // Redirect to ensure fresh page load with updated session
+          redirect('/account/password?msg=updated');
         }
-        User::updateAvatar($pdo, $uid, $nextPhoto !== '' ? $nextPhoto : null, $selectedPreset);
-        if (isset($_SESSION['user']) && is_array($_SESSION['user'])) {
-          $_SESSION['user']['name'] = $newName;
-          $_SESSION['user']['avatar_photo'] = $nextPhoto !== '' ? $nextPhoto : null;
-          $_SESSION['user']['avatar_preset'] = $selectedPreset;
-        }
-        AuditLog::add($pdo, $uid, "Updated profile settings", null, null);
-        $profileMsg = 'Profile updated.';
-        $currentUser = User::findById($pdo, $uid);
       }
     } else {
       $current = req_str('current_password', '');
@@ -138,8 +143,15 @@ function account_password(): void {
       } elseif (($passwordError = account_password_strength_error($current, $next, $confirm)) !== null) {
         $error = $passwordError;
       } else {
-        User::updatePassword($pdo, $uid, password_hash($next, PASSWORD_DEFAULT));
+        $nextHash = User::hashPassword($next);
+        User::updatePassword($pdo, $uid, $nextHash);
+        if (isset($_SESSION['user']) && is_array($_SESSION['user'])) {
+          $_SESSION['user']['password'] = $nextHash;
+        }
         AuditLog::add($pdo, $uid, "Changed password", null, null);
+        if ($forceChange) {
+          redirect(workspace_home_path() . '?msg=password_updated');
+        }
         $msg = 'Password updated.';
       }
     }
@@ -152,6 +164,7 @@ function account_password(): void {
     'profileMsg' => $profileMsg,
     'currentUser' => $currentUser,
     'avatarPresets' => account_avatar_presets(),
+    'forceChange' => $forceChange,
   ]);
 }
 

@@ -4,7 +4,7 @@ setlocal
 set "APACHE_START=C:\xampp\apache_start.bat"
 set "MYSQL_EXE=C:\xampp\mysql\bin\mysqld.exe"
 set "MYSQL_INI=C:\xampp\mysql\bin\my.ini"
-set "APP_URL=http://localhost/wdms/login"
+set "APP_URL=http://localhost/CDD-File-Tracking-System/login"
 
 tasklist /FI "IMAGENAME eq mysqld.exe" | find /I "mysqld.exe" >nul
 if errorlevel 1 (
@@ -24,11 +24,11 @@ if errorlevel 1 (
   echo Apache is already running.
 )
 
-echo Opening WDMS...
+echo Opening CDD-File-Tracking-System...
 start "" "%APP_URL%"
 
 echo.
-echo WDMS should now be running at %APP_URL%
+echo CDD-File-Tracking-System should now be running at %APP_URL%
 echo If the page was already open, refresh the browser once.
 echo You can close this window.
 endlocal

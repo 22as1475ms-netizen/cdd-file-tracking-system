@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Document Action Tracking Form</title>
+  <link rel="stylesheet" href="../assets/css/document-action-tracking.css">
+</head>
+<body>
+  <div class="form-sheet">
+    <header class="form-header">
+      <div class="org">
+        <div class="org-name">DEPARTMENT OF ENVIRONMENT AND NATURAL RESOURCES</div>
+        <div class="doc-title">DOCUMENT ACTION TRACKING SYSTEM</div>
+      </div>
+      <div class="meta-row">
+        <div class="meta-col">
+          <label>Doc. No.</label>
+          <div class="field small">&nbsp;</div>
+        </div>
+        <div class="meta-col">
+          <label>SENDER</label>
+          <div class="field wide">&nbsp;</div>
+        </div>
+        <div class="meta-col right">
+          <label>DATE / TIME RECEIVED</label>
+          <div class="field small">&nbsp;</div>
+        </div>
+      </div>
+
+      <div class="meta-row">
+        <div class="meta-col full">
+          <label>SUBJECT / MEMO</label>
+          <div class="field full">&nbsp;</div>
+        </div>
+      </div>
+
+      <div class="meta-row">
+        <div class="meta-col">
+          <label>ADDRESSEE</label>
+          <div class="field wide">&nbsp;</div>
+        </div>
+        <div class="meta-col right">
+          <label>RUSH</label>
+          <div class="checkbox"><input type="checkbox" aria-label="Rush"></div>
+        </div>
+      </div>
+    </header>
+
+    <section class="routing">
+      <h3>Routing and Action Info</h3>
+      <table class="routing-table">
+        <thead>
+          <tr>
+            <th style="width:12%">FROM</th>
+            <th style="width:18%">TO / FOR</th>
+            <th style="width:12%">DATE / TIME ACTED</th>
+            <th style="width:42%">ACTION REQUIRED / REMARK / STATUS TAKEN</th>
+            <th style="width:16%">DUE DATE</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="section-row">
+            <td class="section-label">ORED</td>
+            <td>
+              <div class="checkbox-list">
+                <label><input type="checkbox"> ARD TS</label>
+                <label><input type="checkbox"> ARD MS</label>
+                <label><input type="checkbox"> EMB</label>
+                <label><input type="checkbox"> RPAO</label>
+                <label><input type="checkbox"> MGB</label>
+              </div>
+            </td>
+            <td class="smallfield">&nbsp;</td>
+            <td class="actions">For appropriate action<br>For info / record / file<br>For evaluation / review<br>For comment / recommendation<br>For investigation</td>
+            <td class="smallfield">&nbsp;</td>
+          </tr>
+
+          <tr class="signature-row">
+            <td colspan="2" class="sign">RED's signature / initial: ____________________</td>
+            <td colspan="3"></td>
+          </tr>
+
+          <tr class="section-row">
+            <td class="section-label">TS</td>
+            <td>
+              <div class="checkbox-list">
+                <label><input type="checkbox"> LPDD</label>
+                <label><input type="checkbox"> SMD</label>
+                <label><input type="checkbox"> ED</label>
+                <label><input type="checkbox"> CDD</label>
+              </div>
+            </td>
+            <td class="smallfield">&nbsp;</td>
+            <td class="actions">For appropriate action<br>As instructed / directed<br>Pls. act URGENTLY</td>
+            <td class="smallfield">&nbsp;</td>
+          </tr>
+
+          <tr class="signature-row">
+            <td colspan="2" class="sign">ASD's signature / initial: ____________________</td>
+            <td colspan="3"></td>
+          </tr>
+
+          <tr class="notes-row">
+            <td colspan="5" class="notes">
+              <div class="notes-label">Remarks / Instructions</div>
+              <div class="notes-field">&nbsp;</div>
+              <div class="notes-field">&nbsp;</div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <footer class="form-footer">
+      <div class="prepared">Prepared by: ______________________</div>
+      <div class="received">Received by: ______________________</div>
+    </footer>
+  </div>
+</body>
+</html>

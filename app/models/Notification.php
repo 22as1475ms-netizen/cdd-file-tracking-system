@@ -1,6 +1,9 @@
 <?php
 class Notification {
   public static function add(PDO $pdo, int $userId, string $title, ?string $body = null, ?string $link = null): void {
+    if (!self::shouldStore($pdo, $userId, $title)) {
+      return;
+    }
     $pdo->prepare("INSERT INTO notifications(user_id,title,body,link) VALUES(?,?,?,?)")
       ->execute([$userId, $title, $body, $link]);
   }
@@ -54,30 +57,39 @@ class Notification {
     $blob = strtolower($title . ' ' . $body);
     $docId = self::extractDocumentId($link, $title, $body);
 
-    if ($link === 'chat://open') {
-      return 'chat://open';
-    }
     if ($link !== '' && $link !== '/documents') {
       return $link;
     }
 
-    if (str_contains($blob, 'new chat message')) {
-      return 'chat://open';
-    }
     if (str_contains($blob, 'shared with you') || str_contains($blob, 'access was revoked') || str_contains($blob, 'revoked')) {
       return '/documents?tab=shared';
     }
     if ((str_contains($blob, 'approved') || str_contains($blob, 'rejected') || str_contains($blob, 'review')) && $docId !== null) {
       return '/documents/view?id=' . $docId;
     }
-    if ((str_contains($blob, 'document') || str_contains($blob, 'version') || str_contains($blob, 'shared') || str_contains($blob, 'message')) && $docId !== null) {
+    if ((str_contains($blob, 'document') || str_contains($blob, 'version') || str_contains($blob, 'shared') || str_contains($blob, 'route')) && $docId !== null) {
       return '/documents/view?id=' . $docId;
-    }
-    if (str_contains($blob, 'message') || str_contains($blob, 'chat')) {
-      return 'chat://open';
     }
 
     return '';
+  }
+
+  private static function shouldStore(PDO $pdo, int $userId, string $title): bool {
+    if ($userId <= 0) {
+      return false;
+    }
+
+    $stmt = $pdo->prepare("SELECT role FROM users WHERE id = ? LIMIT 1");
+    $stmt->execute([$userId]);
+    $role = strtoupper((string)$stmt->fetchColumn());
+    if (!in_array($role, ['SUPER_ADMIN', 'ADMIN'], true)) {
+      return true;
+    }
+
+    return in_array(trim($title), [
+      'Route lifecycle completed',
+      'File shared to another user',
+    ], true);
   }
 
   private static function extractDocumentId(string $link, string $title, string $body): ?int {

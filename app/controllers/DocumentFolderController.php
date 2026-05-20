@@ -6,7 +6,7 @@ function empty_trash(): void {
 
   $uid = (int)($_SESSION['user']['id'] ?? 0);
   if (!require_reauth($pdo, $uid, req_str('confirm_password', ''))) {
-    redirect('/documents?tab=trash&err=reauth_failed');
+    redirect('/admin/dashboard');
   }
   $ownerId = selected_owner_id($pdo, $uid);
   $trashedRoots = Folder::trashedRootFolders(Folder::listTrashedForUser($pdo, $ownerId));
@@ -20,17 +20,17 @@ function empty_trash(): void {
   $folderIds = Folder::idsInTreeForPaths($pdo, $ownerId, $eligibleRootPaths);
   $docIds = Document::trashedIdsEligibleForPurge($pdo, $ownerId, TRASH_RETENTION_DAYS);
   if (empty($docIds) && empty($folderIds)) {
-    redirect('/documents?tab=trash&msg=trash_already_empty&user_id='.$ownerId);
+    redirect('/admin/dashboard');
   }
 
   try {
     purge_trash_items($pdo, $ownerId, $folderIds, $docIds);
   } catch (Throwable $e) {
-    redirect('/documents?tab=trash&err=trash_empty_failed&user_id='.$ownerId);
+    redirect('/admin/dashboard');
   }
 
   AuditLog::add($pdo, $uid, "Emptied trash", null, "owner_id=".$ownerId);
-  redirect('/documents?tab=trash&msg=trash_emptied&user_id='.$ownerId);
+  redirect('/admin/dashboard?msg=trash_emptied');
 }
 
 function create_folder(): void {
@@ -46,7 +46,7 @@ function create_folder(): void {
     Folder::firstOrCreateForUser($pdo, $ownerId, $fullName, 'OFFICIAL');
     AuditLog::add($pdo, $uid, "Created folder", null, $fullName . ";owner_id=".$ownerId);
   }
-  redirect('/documents?tab=routed' . ($parentFolderId > 0 ? '&folder=' . $parentFolderId : '') . '&user_id='.$ownerId);
+  redirect('/admin/dashboard');
 }
 
 function delete_folder(): void {
@@ -58,10 +58,10 @@ function delete_folder(): void {
   $folderId = request_folder_id();
   $folder = Folder::getForUser($pdo, $folderId, $ownerId, $storageArea);
   if (!$folder) {
-    redirect('/documents?tab=' . storage_area_tab($storageArea) . '&err=folder_not_found&user_id='.$ownerId);
+    redirect('/admin/dashboard');
   }
   if (folder_tree_locked_document_exists($pdo, $ownerId, (string)$folder['name'], $storageArea) && !is_admin_user()) {
-    redirect('/documents?tab=' . storage_area_tab($storageArea) . '&err=approval_locked&user_id='.$ownerId);
+    redirect('/admin/dashboard');
   }
 
   $tree = Folder::listTreeForUser($pdo, $ownerId, (string)$folder['name'], $storageArea);
@@ -71,15 +71,15 @@ function delete_folder(): void {
   }
   $deletedFolders = Folder::softDeleteTreeForUser($pdo, $ownerId, (string)$folder['name'], $uid, $storageArea);
   AuditLog::add($pdo, $uid, "Deleted folder", null, "folder_id=".$folderId.", docs_trashed=".$deletedDocs.", folders_trashed=".$deletedFolders);
-  redirect('/documents?tab=' . storage_area_tab($storageArea) . '&msg=folder_deleted&user_id='.$ownerId);
+  redirect('/admin/dashboard?msg=folder_deleted');
 }
 
 function move_folder_to_official(): void {
-  redirect('/documents?tab=routed&msg=feature_retired');
+  redirect('/admin/dashboard?msg=feature_retired');
 }
 
 function move_folder_to_private(): void {
-  redirect('/documents?tab=routed&msg=feature_retired');
+  redirect('/admin/dashboard?msg=feature_retired');
 }
 
 function rename_folder(): void {
@@ -91,11 +91,11 @@ function rename_folder(): void {
   $newName = trim(req_str('new_name', ''));
   $folder = Folder::getForUser($pdo, $folderId, $ownerId, 'OFFICIAL');
   if (!$folder || $newName === '') {
-    redirect('/documents?tab=routed&err=folder_not_found&user_id='.$ownerId);
+    redirect('/admin/dashboard');
   }
   $parentPath = Folder::parentPath((string)$folder['name']);
   $targetPath = folder_path_join($parentPath, mb_substr($newName, 0, 120));
   Folder::renameTreeForUser($pdo, $ownerId, (string)$folder['name'], $targetPath, 'OFFICIAL');
   AuditLog::add($pdo, $uid, "Renamed folder", null, "folder_id=".$folderId.", name=".$targetPath);
-  redirect('/documents?tab=routed&folder='.$folderId.'&msg=folder_renamed&user_id='.$ownerId);
+  redirect('/admin/dashboard?msg=folder_renamed');
 }

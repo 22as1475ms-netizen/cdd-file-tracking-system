@@ -5,6 +5,7 @@ require_once __DIR__ . "/../models/Permission.php";
 require_once __DIR__ . "/../models/Notification.php";
 require_once __DIR__ . "/../models/AuditLog.php";
 require_once __DIR__ . "/../models/Division.php";
+require_once __DIR__ . "/../models/User.php";
 require_once __DIR__ . "/../services/AccessService.php";
 
 class DocumentShareService {
@@ -32,52 +33,22 @@ class DocumentShareService {
 
     $permission = self::normalizePermission($permission);
     $targetId = (int)($target['id'] ?? 0);
-    $role = strtoupper((string)($target['role'] ?? ''));
     $division = (int)($target['division_id'] ?? 0) > 0 ? Division::find($pdo, (int)$target['division_id']) : null;
 
-    // Do not revoke existing permissions — allow multiple recipients to hold shared access.
     Permission::upsert($pdo, $docId, $targetId, $permission, $actorId);
-    // If the share target is an admin, auto-accept the share so admin sees the file immediately.
-    if ($role === 'ADMIN') {
-      Permission::accept($pdo, $docId, $targetId);
-      $recipientName = trim((string)($target['name'] ?? 'Admin'));
-      Document::updateTrackingState($pdo, $docId, 'Shared with ' . $recipientName, 'SHARE_ACCEPTED');
-      Document::markRouteActive($pdo, $docId);
-      DocumentRoute::add(
-        $pdo,
-        $docId,
-        (string)($doc['current_location'] ?? ''),
-        'Shared with ' . $recipientName,
-        'SHARE_ACCEPTED',
-        'Shared with admin: ' . $recipientName,
-        $actorId
-      );
-      if (($options['notify'] ?? true) !== false) {
-        // Notify the owner that the share was accepted by admin
-        $notifyUserId = (int)($doc['owner_id'] ?? 0);
-        if ($notifyUserId > 0) {
-          Notification::add(
-            $pdo,
-            $notifyUserId,
-            'Shared document accepted',
-            'The document was shared with an administrator and is now visible to them.',
-            '/documents/view?id=' . $docId
-          );
-        }
-      }
-    } else {
-      Document::updateTrackingState($pdo, $docId, 'Awaiting recipient acceptance', 'PENDING_SHARE_ACCEPTANCE');
-      Document::markRouteActive($pdo, $docId);
-      DocumentRoute::add(
-        $pdo,
-        $docId,
-        (string)($doc['current_location'] ?? ''),
-        'Awaiting recipient acceptance',
-        'PENDING_SHARE_ACCEPTANCE',
-        self::shareRouteNote($target, $division, (string)($options['note_suffix'] ?? '')),
-        $actorId
-      );
-    }
+    Permission::accept($pdo, $docId, $targetId);
+    $recipientName = trim((string)($target['name'] ?? 'Recipient'));
+    Document::updateTrackingState($pdo, $docId, 'Shared with ' . $recipientName, 'SHARE_ACCEPTED');
+    Document::markRouteActive($pdo, $docId);
+    DocumentRoute::add(
+      $pdo,
+      $docId,
+      (string)($doc['current_location'] ?? ''),
+      'Shared with ' . $recipientName,
+      'SHARE_ACCEPTED',
+      self::shareRouteNote($target, $division, (string)($options['note_suffix'] ?? '')),
+      $actorId
+    );
 
     if (($options['audit'] ?? true) !== false) {
       AuditLog::add(
@@ -89,15 +60,17 @@ class DocumentShareService {
       );
     }
 
-    if (($options['notify'] ?? true) !== false && $role !== 'ADMIN') {
+    if (($options['notify'] ?? true) !== false) {
       Notification::add(
         $pdo,
         $targetId,
         (string)($options['notification_title'] ?? 'A routed file was shared with you'),
-        (string)($options['notification_body'] ?? 'Open the routed file to accept it.'),
+        (string)($options['notification_body'] ?? 'The routed file is now available in your files.'),
         (string)($options['notification_link'] ?? ('/documents/view?id=' . $docId))
       );
     }
+
+    self::notifyAdminAboutShare($pdo, $doc, $actorId, $target);
 
     return [
       'document_id' => $docId,
@@ -120,11 +93,6 @@ class DocumentShareService {
       Document::updateTrackingState($pdo, $docId, 'Shared with ' . $recipientName, 'SHARE_ACCEPTED');
       Document::markRouteActive($pdo, $docId);
       DocumentRoute::add($pdo, $docId, 'Awaiting recipient acceptance', 'Shared with ' . $recipientName, 'SHARE_ACCEPTED', 'Recipient accepted the routed document.', $actorId);
-      $notifyUserId = (int)($permissionRow['shared_by'] ?? 0);
-      if ($notifyUserId <= 0) {
-        $notifyUserId = (int)($doc['owner_id'] ?? 0);
-      }
-      Notification::add($pdo, $notifyUserId, 'Shared document accepted', (string)($_SESSION['user']['email'] ?? ''), '/documents/view?id=' . $docId);
       AuditLog::add($pdo, $actorId, 'Accepted shared document', $docId, null);
       return ['status' => 'accepted'];
     }
@@ -138,7 +106,6 @@ class DocumentShareService {
     Document::updateTrackingState($pdo, $docId, 'Share declined by recipient', 'SHARE_DECLINED');
     Document::closeRoute($pdo, $docId, 'RETURNED');
     DocumentRoute::add($pdo, $docId, 'Awaiting recipient acceptance', 'Share declined by recipient', 'SHARE_DECLINED', $cleanNote, $actorId);
-    Notification::add($pdo, (int)($doc['owner_id'] ?? 0), 'Shared document not accepted', $cleanNote, '/documents/view?id=' . $docId);
     AuditLog::add($pdo, $actorId, 'Declined shared document', $docId, $cleanNote);
 
     return ['status' => 'declined'];
@@ -161,7 +128,6 @@ class DocumentShareService {
         continue;
       }
       Permission::revoke($pdo, $docId, $memberUserId);
-      Notification::add($pdo, $memberUserId, 'Share cancelled by owner', (string)($doc['title'] ?? $doc['name'] ?? ''), '/documents?tab=shared');
     }
 
     Document::updateTrackingState($pdo, $docId, $ownerName, 'AVAILABLE');
@@ -180,6 +146,87 @@ class DocumentShareService {
     return ['revoked_members' => count($shareMembers)];
   }
 
+  public static function completeRouteLifecycle(PDO $pdo, array $doc, int $actorId, ?string $note = null): array {
+    $docId = (int)($doc['id'] ?? 0);
+    if ($docId <= 0) {
+      throw new RuntimeException('not_found');
+    }
+
+    $level = AccessService::level($pdo, $docId, $actorId);
+    if (!in_array($level, ['editor', 'viewer', 'division_chief'], true)) {
+      throw new RuntimeException('forbidden');
+    }
+
+    $routeOutcome = strtoupper((string)($doc['route_outcome'] ?? 'ACTIVE'));
+    $routingStatus = strtoupper((string)($doc['routing_status'] ?? 'AVAILABLE'));
+    $actor = User::findById($pdo, $actorId);
+    $actorRole = strtoupper((string)($actor['role'] ?? $_SESSION['user']['role'] ?? ''));
+    if (in_array($actorRole, ['SECTION_ADMIN', 'DIVISION_CHIEF'], true)) {
+      throw new RuntimeException('forbidden');
+    }
+    if ($routeOutcome !== 'ACTIVE' || $routingStatus === 'COMPLETED') {
+      throw new RuntimeException('decision_already_final');
+    }
+
+    $actorName = trim((string)($actor['name'] ?? $_SESSION['user']['name'] ?? 'Current holder'));
+    $holderLocation = trim((string)($doc['current_location'] ?? ''));
+    if ($holderLocation === '') {
+      $holderLocation = 'Shared with ' . $actorName;
+    }
+
+    $storedNote = trim((string)$note);
+    if ($storedNote !== '') {
+      $storedNote = mb_substr($storedNote, 0, 1000);
+    } else {
+      $storedNote = 'Route lifecycle completed by ' . $actorName . ' and remains with the final routed holder.';
+    }
+
+    $ownerId = (int)($doc['owner_id'] ?? 0);
+
+    // Keep the completing staff member with read-only access to retain a copy
+    // of the routed file, while preserving visibility for prior routed recipients.
+    try {
+      Permission::upsert($pdo, $docId, $actorId, 'viewer', $ownerId > 0 ? $ownerId : null);
+      Permission::accept($pdo, $docId, $actorId);
+      
+      // Verify the permission was actually saved
+      $verifyPerm = Permission::findRowForUser($pdo, $docId, $actorId);
+      if (!$verifyPerm || empty($verifyPerm['accepted_at'])) {
+        throw new RuntimeException('permission_not_saved');
+      }
+      } catch (Exception $e) {
+      throw new RuntimeException('permission_setup_failed: ' . $e->getMessage());
+    }
+
+    Document::completeRouteLifecycle($pdo, $docId, $holderLocation);
+    DocumentRoute::add(
+      $pdo,
+      $docId,
+      $holderLocation,
+      $holderLocation,
+      'COMPLETED',
+      $storedNote,
+      $actorId
+    );
+
+    if ($ownerId > 0) {
+      Notification::add(
+        $pdo,
+        $ownerId,
+        'Route lifecycle completed',
+        $actorName . ' completed the route and the file remains with the final routed holder.',
+        '/documents/view?id=' . $docId
+      );
+    }
+
+    AuditLog::add($pdo, $actorId, 'Completed route lifecycle', $docId, $storedNote);
+
+    return [
+      'document_id' => $docId,
+      'status' => 'completed',
+    ];
+  }
+
   private static function normalizePermission(string $permission): string {
     return 'editor';
   }
@@ -193,8 +240,21 @@ class DocumentShareService {
     $level = AccessService::level($pdo, (int)($doc['id'] ?? 0), $actorId);
     $routingStatus = strtoupper((string)($doc['routing_status'] ?? 'AVAILABLE'));
     $routeOutcome = strtoupper((string)($doc['route_outcome'] ?? 'ACTIVE'));
-    if ($routeOutcome !== 'ACTIVE' || in_array($routingStatus, ['APPROVED', 'REJECTED'], true)) {
+    $actor = User::findById($pdo, $actorId);
+    $actorRole = strtoupper((string)($actor['role'] ?? $_SESSION['user']['role'] ?? ''));
+    if ($routeOutcome !== 'ACTIVE' || in_array($routingStatus, ['APPROVED', 'REJECTED', 'COMPLETED'], true)) {
       return true;
+    }
+
+    if ($level === 'admin') {
+      return false;
+    }
+
+    if (in_array($actorRole, ['SECTION_ADMIN', 'DIVISION_CHIEF'], true) && $routingStatus === 'SHARE_ACCEPTED') {
+      $currentAcceptedUserId = Permission::currentAcceptedUserId($pdo, (int)($doc['id'] ?? 0));
+      if ($currentAcceptedUserId !== $actorId) {
+        return true;
+      }
     }
 
     return match ($routingStatus) {
@@ -207,7 +267,7 @@ class DocumentShareService {
 
   private static function assertValidTarget(array $doc, int $actorId, array $target): void {
     $role = strtoupper((string)($target['role'] ?? ''));
-    if (!in_array($role, ['EMPLOYEE', 'DIVISION_CHIEF', 'ADMIN'], true)) {
+    if (!in_array($role, ['SECTION_STAFF', 'SECTION_ADMIN', 'EMPLOYEE', 'DIVISION_CHIEF', 'ADMIN', 'SUPER_ADMIN'], true)) {
       throw new RuntimeException('user_not_found');
     }
 
@@ -242,12 +302,37 @@ class DocumentShareService {
       $parts[] = 'with division chief ' . $chiefName;
     }
 
-    $note = implode(' ', $parts) . ' and is waiting for acceptance.';
+    $note = implode(' ', $parts) . ' and is now active in the routed workflow.';
     $suffix = trim($suffix);
     if ($suffix !== '') {
       $note .= ' ' . $suffix;
     }
 
     return $note;
+  }
+
+  private static function notifyAdminAboutShare(PDO $pdo, array $doc, int $actorId, array $target): void {
+    $actor = User::findById($pdo, $actorId);
+    if (!$actor || in_array(strtoupper((string)($actor['role'] ?? '')), ['SUPER_ADMIN', 'ADMIN'], true)) {
+      return;
+    }
+
+    $stmt = $pdo->prepare("SELECT id FROM users WHERE role IN ('SUPER_ADMIN', 'ADMIN') AND status = 'ACTIVE' ORDER BY FIELD(role, 'SUPER_ADMIN', 'ADMIN'), id LIMIT 1");
+    $stmt->execute();
+    $adminId = (int)$stmt->fetchColumn();
+    if ($adminId <= 0) {
+      return;
+    }
+
+    $docName = trim((string)($doc['name'] ?? 'Routed file'));
+    $actorName = trim((string)($actor['name'] ?? 'A user'));
+    $targetName = trim((string)($target['name'] ?? 'another user'));
+    Notification::add(
+      $pdo,
+      $adminId,
+      'File shared to another user',
+      $actorName . ' routed ' . $docName . ' to ' . $targetName . '.',
+      '/documents/view?id=' . (int)($doc['id'] ?? 0)
+    );
   }
 }

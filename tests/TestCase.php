@@ -4,7 +4,7 @@ abstract class TestCase {
   protected PDO $pdo;
 
   public function setUp(): void {
-    wdms_test_reset_database();
+    cddfts_test_reset_database();
     $this->pdo = $GLOBALS['pdo'];
     $_SESSION = [];
   }
@@ -50,6 +50,13 @@ abstract class TestCase {
     if (!str_contains($haystack, $needle)) {
       $detail = $message !== '' ? $message . ' ' : '';
       throw new RuntimeException($detail . 'Did not find "' . $needle . '" in "' . $haystack . '".');
+    }
+  }
+
+  protected function assertStringNotContains(string $needle, string $haystack, string $message = ''): void {
+    if (str_contains($haystack, $needle)) {
+      $detail = $message !== '' ? $message . ' ' : '';
+      throw new RuntimeException($detail . 'Did not expect to find "' . $needle . '" in "' . $haystack . '".');
     }
   }
 

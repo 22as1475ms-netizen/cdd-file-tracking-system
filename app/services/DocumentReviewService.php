@@ -15,7 +15,7 @@ class DocumentReviewService {
     if ($docId <= 0) {
       throw new RuntimeException('not_found');
     }
-    if ((int)($doc['owner_id'] ?? 0) !== $actorId && strtoupper((string)($_SESSION['user']['role'] ?? '')) !== 'ADMIN') {
+    if ((int)($doc['owner_id'] ?? 0) !== $actorId && !in_array(strtoupper((string)($_SESSION['user']['role'] ?? '')), ['SUPER_ADMIN', 'ADMIN'], true)) {
       throw new RuntimeException('forbidden');
     }
     if (!self::canSubmit($doc)) {
@@ -36,7 +36,7 @@ class DocumentReviewService {
     $assignedReviewerId = (int)($assignment['chief_user_id'] ?? 0);
     $assignedReviewer = $assignedReviewerId > 0 ? User::findById($pdo, $assignedReviewerId) : null;
     // If the assigned reviewer is an admin, auto-accept the review so the admin sees it immediately.
-    if (($assignedReviewer['role'] ?? '') === 'ADMIN') {
+    if (in_array(strtoupper((string)($assignedReviewer['role'] ?? '')), ['SUPER_ADMIN', 'ADMIN'], true)) {
       Document::acceptReviewAssignment($pdo, $docId);
       $stageLabel = 'Section Chief';
       Document::updateTrackingState($pdo, $docId, $stageLabel . ' Review Workspace', 'IN_REVIEW');
@@ -83,7 +83,7 @@ class DocumentReviewService {
     }
 
     $assignedReviewerId = (int)($doc['assigned_reviewer_id'] ?? 0);
-    if ($assignedReviewerId > 0 && $assignedReviewerId !== $actorId && strtoupper((string)($_SESSION['user']['role'] ?? '')) !== 'ADMIN') {
+    if ($assignedReviewerId > 0 && $assignedReviewerId !== $actorId && !in_array(strtoupper((string)($_SESSION['user']['role'] ?? '')), ['SUPER_ADMIN', 'ADMIN'], true)) {
       throw new RuntimeException('forbidden');
     }
 
@@ -130,7 +130,7 @@ class DocumentReviewService {
       throw new RuntimeException('decision_invalid');
     }
     $assignedReviewerId = (int)($doc['assigned_reviewer_id'] ?? 0);
-    if ($assignedReviewerId > 0 && $assignedReviewerId !== $actorId && strtoupper((string)($_SESSION['user']['role'] ?? '')) !== 'ADMIN') {
+    if ($assignedReviewerId > 0 && $assignedReviewerId !== $actorId && !in_array(strtoupper((string)($_SESSION['user']['role'] ?? '')), ['SUPER_ADMIN', 'ADMIN'], true)) {
       throw new RuntimeException('forbidden');
     }
 

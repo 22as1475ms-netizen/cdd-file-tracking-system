@@ -9,6 +9,21 @@ class DocumentRoute {
     ?string $note,
     int $routedBy
   ): int {
+    // Keep routing records tied to the super admin account for CDD-wide auditing.
+    $currentRole = strtoupper((string)($_SESSION['user']['role'] ?? ''));
+    if (!in_array($currentRole, ['SUPER_ADMIN', 'ADMIN'], true)) {
+      try {
+        $stmt = $pdo->prepare("SELECT id FROM users WHERE role IN ('SUPER_ADMIN', 'ADMIN') ORDER BY FIELD(role, 'SUPER_ADMIN', 'ADMIN'), id LIMIT 1");
+        $stmt->execute();
+        $row = $stmt->fetch();
+        if (!empty($row['id'])) {
+          $routedBy = (int)$row['id'];
+        }
+      } catch (Throwable $e) {
+        // If something goes wrong, fall back to the provided routedBy value.
+      }
+    }
+
     $pdo->prepare("
       INSERT INTO document_routes(document_id, from_location, to_location, status_snapshot, note, routed_by)
       VALUES(?,?,?,?,?,?)
@@ -46,6 +61,7 @@ class DocumentRoute {
       'REVIEW_ASSIGNMENT_DECLINED' => 'REVIEW_ASSIGNMENT_DECLINED',
       'APPROVED' => 'APPROVED',
       'REJECTED' => 'REJECTED',
+      'COMPLETED' => 'COMPLETED',
       default => 'AVAILABLE',
     };
   }

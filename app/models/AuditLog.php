@@ -1,6 +1,14 @@
 <?php
 class AuditLog {
-  public static function add(PDO $pdo, int $userId, string $action, ?int $docId=null, ?string $meta=null): void {
+  public static function add(PDO $pdo, int $userId, string $action, ?int $docId=null, ?string $meta=null, ?string $category=null): void {
+    $resolvedCategory = self::normalizeCategory($category ?? self::inferCategory($action));
+
+    if (self::hasCategoryColumn($pdo)) {
+      $pdo->prepare("INSERT INTO audit_logs(user_id,category,action,document_id,meta) VALUES(?,?,?,?,?)")
+          ->execute([$userId, $resolvedCategory, $action, $docId, $meta]);
+      return;
+    }
+
     $pdo->prepare("INSERT INTO audit_logs(user_id,action,document_id,meta) VALUES(?,?,?,?)")
         ->execute([$userId, $action, $docId, $meta]);
   }
@@ -42,16 +50,51 @@ class AuditLog {
     ")->fetchAll();
   }
 
-  public static function allForUserWithUser(PDO $pdo, int $userId): array {
-    $s = $pdo->prepare("
+  public static function allForUserWithUser(PDO $pdo, int $userId, ?string $category = null): array {
+    $hasCategoryColumn = self::hasCategoryColumn($pdo);
+    $sql = "
       SELECT a.*, u.name, u.email, u.role, u.status
       FROM audit_logs a
       JOIN users u ON u.id = a.user_id
       WHERE a.user_id=?
-      ORDER BY a.created_at DESC, a.id DESC
-    ");
-    $s->execute([$userId]);
-    return $s->fetchAll();
+    ";
+    $params = [$userId];
+    if ($hasCategoryColumn && $category !== null && $category !== '' && strtoupper($category) !== 'ALL') {
+      $sql .= " AND a.category=? ";
+      $params[] = self::normalizeCategory($category);
+    }
+    $sql .= " ORDER BY a.created_at DESC, a.id DESC ";
+    $s = $pdo->prepare($sql);
+    $s->execute($params);
+    $rows = $s->fetchAll();
+
+    foreach ($rows as &$row) {
+      $row['category'] = self::normalizeCategory((string)($row['category'] ?? self::inferCategory((string)($row['action'] ?? ''))));
+    }
+    unset($row);
+
+    if (!$hasCategoryColumn && $category !== null && $category !== '' && strtoupper($category) !== 'ALL') {
+      $normalizedFilter = self::normalizeCategory($category);
+      $rows = array_values(array_filter($rows, static fn(array $row): bool => ($row['category'] ?? 'SYSTEM') === $normalizedFilter));
+    }
+
+    return $rows;
+  }
+
+  public static function categories(): array {
+    return ['AUTH', 'ACCOUNT', 'DOCUMENT', 'ROUTING', 'REVIEW', 'FOLDER', 'SYSTEM'];
+  }
+
+  public static function categoryLabel(string $category): string {
+    return match (self::normalizeCategory($category)) {
+      'AUTH' => 'Authentication',
+      'ACCOUNT' => 'Account',
+      'DOCUMENT' => 'Document',
+      'ROUTING' => 'Routing',
+      'REVIEW' => 'Review',
+      'FOLDER' => 'Folder',
+      default => 'System',
+    };
   }
 
   public static function summaryLastDays(PDO $pdo, int $days = 7): array {
@@ -107,5 +150,68 @@ class AuditLog {
     $s = $pdo->prepare($sql);
     $s->execute($params);
     return $s->fetchAll();
+  }
+
+  private static function normalizeCategory(string $category): string {
+    $normalized = strtoupper(trim($category));
+    return in_array($normalized, self::categories(), true) ? $normalized : 'SYSTEM';
+  }
+
+  private static function hasCategoryColumn(PDO $pdo): bool {
+    static $cache = [];
+
+    $cacheKey = spl_object_hash($pdo);
+    if (array_key_exists($cacheKey, $cache)) {
+      return $cache[$cacheKey];
+    }
+
+    $stmt = $pdo->prepare("
+      SELECT COUNT(*)
+      FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'audit_logs'
+        AND COLUMN_NAME = 'category'
+    ");
+    $stmt->execute();
+
+    return $cache[$cacheKey] = ((int)$stmt->fetchColumn() > 0);
+  }
+
+  private static function inferCategory(string $action): string {
+    $normalized = strtolower(trim($action));
+
+    if (str_contains($normalized, 'logged in') || str_contains($normalized, 'logged out') || str_contains($normalized, 'password')) {
+      return 'AUTH';
+    }
+
+    if (str_contains($normalized, 'user') || str_contains($normalized, 'account') || str_contains($normalized, 'division') || str_contains($normalized, 'profile')) {
+      return 'ACCOUNT';
+    }
+
+    if (str_contains($normalized, 'folder') || str_contains($normalized, 'trash')) {
+      return 'FOLDER';
+    }
+
+    if (str_contains($normalized, 'review') || str_contains($normalized, 'approved routed file') || str_contains($normalized, 'rejected routed file')) {
+      return 'REVIEW';
+    }
+
+    if (str_contains($normalized, 'share') || str_contains($normalized, 'route') || str_contains($normalized, 'routed')) {
+      return 'ROUTING';
+    }
+
+    if (
+      str_contains($normalized, 'document')
+      || str_contains($normalized, 'version')
+      || str_contains($normalized, 'spreadsheet')
+      || str_contains($normalized, 'word')
+      || str_contains($normalized, 'metadata')
+      || str_contains($normalized, 'download')
+      || str_contains($normalized, 'upload')
+    ) {
+      return 'DOCUMENT';
+    }
+
+    return 'SYSTEM';
   }
 }

@@ -26,5 +26,21 @@ Thumbs.db
 /backups/
 /storage/secrets/
 /storage/documents/
+/storage/runtime_sessions/
+/storage/sessions/
 /storage/cloudflared.exe
 /storage/*.log
+/public/uploads/avatars/
+
+# Local diagnostics / scratch files
+/check_*.php
+/cleanup_test.php
+/fix_william_permission.php
+/test_permission.php
+/query
+
+# Nested spreadsheet source
+/tools/web-spreadsheet/**/node_modules/
+/tools/web-spreadsheet/frontend/dist/
+/tools/web-spreadsheet/backend/.env
+/tools/web-spreadsheet/backend/*.log

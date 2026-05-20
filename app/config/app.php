@@ -1,11 +1,56 @@
 <?php
 
-function wdms_env_string(string $key, string $default = ''): string {
+cddfts_load_env_files(dirname(__DIR__, 2));
+
+function cddfts_load_env_files(string $projectRoot): void {
+  foreach (['.env', '.env.local'] as $fileName) {
+    $filePath = rtrim($projectRoot, "\\/") . DIRECTORY_SEPARATOR . $fileName;
+    if (!is_file($filePath) || !is_readable($filePath)) {
+      continue;
+    }
+
+    $lines = file($filePath, FILE_IGNORE_NEW_LINES);
+    if ($lines === false) {
+      continue;
+    }
+
+    foreach ($lines as $line) {
+      $trimmed = trim($line);
+      if ($trimmed === '' || str_starts_with($trimmed, '#')) {
+        continue;
+      }
+
+      $separatorPos = strpos($trimmed, '=');
+      if ($separatorPos === false) {
+        continue;
+      }
+
+      $key = trim(substr($trimmed, 0, $separatorPos));
+      if ($key === '' || getenv($key) !== false) {
+        continue;
+      }
+
+      $value = trim(substr($trimmed, $separatorPos + 1));
+      if (
+        strlen($value) >= 2
+        && (($value[0] === '"' && substr($value, -1) === '"') || ($value[0] === "'" && substr($value, -1) === "'"))
+      ) {
+        $value = substr($value, 1, -1);
+      }
+
+      putenv($key . '=' . $value);
+      $_ENV[$key] = $value;
+      $_SERVER[$key] = $value;
+    }
+  }
+}
+
+function cddfts_env_string(string $key, string $default = ''): string {
   $value = getenv($key);
   return $value === false ? $default : trim((string)$value);
 }
 
-function wdms_env_bool(string $key, bool $default): bool {
+function cddfts_env_bool(string $key, bool $default): bool {
   $value = getenv($key);
   if ($value === false) {
     return $default;
@@ -14,13 +59,13 @@ function wdms_env_bool(string $key, bool $default): bool {
   return in_array(strtolower(trim((string)$value)), ['1', 'true', 'yes', 'on'], true);
 }
 
-function wdms_env_int(string $key, int $default, int $min = PHP_INT_MIN): int {
+function cddfts_env_int(string $key, int $default, int $min = PHP_INT_MIN): int {
   $value = getenv($key);
   $intValue = $value === false ? $default : (int)$value;
   return max($min, $intValue);
 }
 
-function wdms_normalize_base_url(string $path): string {
+function cddfts_normalize_base_url(string $path): string {
   $path = trim(str_replace('\\', '/', $path));
   if ($path === '' || $path === '/') {
     return '';
@@ -30,10 +75,10 @@ function wdms_normalize_base_url(string $path): string {
   return $path === '/.' ? '' : $path;
 }
 
-function wdms_detect_base_url(): string {
-  $envBase = wdms_env_string('APP_BASE_PATH', '');
+function cddfts_detect_base_url(): string {
+  $envBase = cddfts_env_string('APP_BASE_PATH', '');
   if ($envBase !== '') {
-    return wdms_normalize_base_url($envBase);
+    return cddfts_normalize_base_url($envBase);
   }
 
   $scriptName = str_replace('\\', '/', (string)($_SERVER['SCRIPT_NAME'] ?? ''));
@@ -46,10 +91,10 @@ function wdms_detect_base_url(): string {
     return '';
   }
 
-  return wdms_normalize_base_url($basePath);
+  return cddfts_normalize_base_url($basePath);
 }
 
-function wdms_base_url_path(string $path = ''): string {
+function cddfts_base_url_path(string $path = ''): string {
   $path = trim($path);
   if ($path === '') {
     return BASE_URL !== '' ? BASE_URL : '/';
@@ -62,8 +107,8 @@ function wdms_base_url_path(string $path = ''): string {
   return (BASE_URL !== '' ? BASE_URL : '') . $path;
 }
 
-function wdms_storage_dir(): string {
-  $configured = wdms_env_string('STORAGE_DIR', '');
+function cddfts_storage_dir(): string {
+  $configured = cddfts_env_string('STORAGE_DIR', '');
   if ($configured !== '') {
     return rtrim($configured, "\\/");
   }
@@ -71,24 +116,24 @@ function wdms_storage_dir(): string {
   return rtrim(__DIR__ . '/../../storage/documents', "\\/");
 }
 
-function wdms_default_upload_bytes(): int {
-  return wdms_is_vercel_runtime() ? 4 * 1024 * 1024 : 1024 * 1024 * 1024;
+function cddfts_default_upload_bytes(): int {
+  return cddfts_is_vercel_runtime() ? 4 * 1024 * 1024 : 1024 * 1024 * 1024;
 }
 
-function wdms_is_vercel_runtime(): bool {
-  return wdms_env_bool('VERCEL', false);
+function cddfts_is_vercel_runtime(): bool {
+  return cddfts_env_bool('VERCEL', false);
 }
 
-function wdms_storage_driver(): string {
-  $configured = strtolower(wdms_env_string('STORAGE_DRIVER', ''));
+function cddfts_storage_driver(): string {
+  $configured = strtolower(cddfts_env_string('STORAGE_DRIVER', ''));
   if (in_array($configured, ['local', 'database'], true)) {
     return $configured;
   }
 
-  return wdms_is_vercel_runtime() ? 'database' : 'local';
+  return cddfts_is_vercel_runtime() ? 'database' : 'local';
 }
 
-function wdms_public_path(string $path = ''): string {
+function cddfts_public_path(string $path = ''): string {
   $root = realpath(__DIR__ . '/../../public') ?: (__DIR__ . '/../../public');
   if ($path === '') {
     return $root;
@@ -97,12 +142,12 @@ function wdms_public_path(string $path = ''): string {
   return rtrim($root, "\\/") . DIRECTORY_SEPARATOR . ltrim(str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $path), DIRECTORY_SEPARATOR);
 }
 
-function wdms_public_upload_dir(string $segment): string {
-  return wdms_public_path('uploads/' . trim($segment, "\\/"));
+function cddfts_public_upload_dir(string $segment): string {
+  return cddfts_public_path('uploads/' . trim($segment, "\\/"));
 }
 
-function wdms_session_dir(): string {
-  $configured = wdms_env_string('SESSION_SAVE_PATH', '');
+function cddfts_session_dir(): string {
+  $configured = cddfts_env_string('SESSION_SAVE_PATH', '');
   if ($configured !== '') {
     return rtrim($configured, "\\/");
   }
@@ -110,22 +155,22 @@ function wdms_session_dir(): string {
   return rtrim(__DIR__ . '/../../storage/runtime_sessions', "\\/");
 }
 
-function wdms_session_driver(): string {
-  $configured = strtolower(wdms_env_string('SESSION_DRIVER', ''));
+function cddfts_session_driver(): string {
+  $configured = strtolower(cddfts_env_string('SESSION_DRIVER', ''));
   if (in_array($configured, ['file', 'database'], true)) {
     return $configured;
   }
 
-  return wdms_is_vercel_runtime() ? 'database' : 'file';
+  return cddfts_is_vercel_runtime() ? 'database' : 'file';
 }
 
-function wdms_app_secret(): string {
-  $envSecret = wdms_env_string('APP_SECRET', '');
+function cddfts_app_secret(): string {
+  $envSecret = cddfts_env_string('APP_SECRET', '');
   if ($envSecret !== '') {
     return $envSecret;
   }
 
-  if (wdms_is_vercel_runtime()) {
+  if (cddfts_is_vercel_runtime()) {
     throw new RuntimeException('APP_SECRET must be configured when running on Vercel.');
   }
 
@@ -153,7 +198,7 @@ function wdms_app_secret(): string {
   return $generated;
 }
 
-function wdms_bootstrap_session(): void {
+function cddfts_bootstrap_session(): void {
   if (session_status() === PHP_SESSION_ACTIVE) {
     return;
   }
@@ -165,14 +210,14 @@ function wdms_bootstrap_session(): void {
     $isSecure = true;
   }
 
-  session_name(wdms_env_string('SESSION_NAME', 'WDMSSESSID'));
+  session_name(cddfts_env_string('SESSION_NAME', 'CDDFILETRACKINGSYSTEMSESSID'));
   session_set_cookie_params([
     'lifetime' => 0,
     'path' => BASE_URL !== '' ? BASE_URL . '/' : '/',
-    'domain' => wdms_env_string('SESSION_DOMAIN', ''),
+    'domain' => cddfts_env_string('SESSION_DOMAIN', ''),
     'secure' => $isSecure,
     'httponly' => true,
-    'samesite' => wdms_env_string('SESSION_SAMESITE', 'Lax'),
+    'samesite' => cddfts_env_string('SESSION_SAMESITE', 'Lax'),
   ]);
 
   if (SESSION_DRIVER === 'database') {
@@ -184,7 +229,7 @@ function wdms_bootstrap_session(): void {
     $handler = new DatabaseSessionHandler($GLOBALS['pdo'], SESSION_TIMEOUT_MINUTES * 60);
     session_set_save_handler($handler, true);
   } else {
-    $sessionDir = wdms_session_dir();
+    $sessionDir = cddfts_session_dir();
     if (!is_dir($sessionDir)) {
       if (!@mkdir($sessionDir, 0775, true) && !is_dir($sessionDir)) {
         throw new RuntimeException('Session storage is unavailable.');
@@ -197,17 +242,17 @@ function wdms_bootstrap_session(): void {
   session_start();
 }
 
-define('BASE_URL', wdms_detect_base_url());
-define('STORAGE_DIR', wdms_storage_dir());
-define('STORAGE_DRIVER', wdms_storage_driver());
-define('APP_NAME', 'WDMS');
-define('APP_DEBUG', wdms_env_bool('APP_DEBUG', false));
-define('APP_URL', rtrim(wdms_env_string('APP_URL', ''), '/'));
-define('APP_SECRET', wdms_app_secret());
-define('SESSION_DRIVER', wdms_session_driver());
+define('BASE_URL', cddfts_detect_base_url());
+define('STORAGE_DIR', cddfts_storage_dir());
+define('STORAGE_DRIVER', cddfts_storage_driver());
+define('APP_NAME', 'CDD-File-Tracking-System');
+define('APP_DEBUG', cddfts_env_bool('APP_DEBUG', false));
+define('APP_URL', rtrim(cddfts_env_string('APP_URL', ''), '/'));
+define('APP_SECRET', cddfts_app_secret());
+define('SESSION_DRIVER', cddfts_session_driver());
 define('PRIVATE_STORAGE_LIMIT_BYTES', 5 * 1024 * 1024 * 1024);
 define('OFFICIAL_STORAGE_LIMIT_BYTES', 5 * 1024 * 1024 * 1024);
-define('SESSION_TIMEOUT_MINUTES', wdms_env_int('SESSION_TIMEOUT_MINUTES', 45, 5));
-define('TRASH_RETENTION_DAYS', wdms_env_int('TRASH_RETENTION_DAYS', 0, 0));
-define('MAX_UPLOAD_BYTES_USER', wdms_env_int('MAX_UPLOAD_BYTES_USER', wdms_default_upload_bytes(), 1));
-define('MAX_UPLOAD_BYTES_ADMIN', wdms_env_int('MAX_UPLOAD_BYTES_ADMIN', wdms_default_upload_bytes(), 1));
+define('SESSION_TIMEOUT_MINUTES', cddfts_env_int('SESSION_TIMEOUT_MINUTES', 45, 5));
+define('TRASH_RETENTION_DAYS', cddfts_env_int('TRASH_RETENTION_DAYS', 0, 0));
+define('MAX_UPLOAD_BYTES_USER', cddfts_env_int('MAX_UPLOAD_BYTES_USER', cddfts_default_upload_bytes(), 1));
+define('MAX_UPLOAD_BYTES_ADMIN', cddfts_env_int('MAX_UPLOAD_BYTES_ADMIN', cddfts_default_upload_bytes(), 1));
