@@ -1,7 +1,6 @@
 <?php
 require_once __DIR__ . "/../../config/app.php";
 require_once __DIR__ . "/../../helpers/http.php";
-require_once __DIR__ . "/../../models/Notification.php";
 require_once __DIR__ . "/../../models/User.php";
 
 $currentPath = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
@@ -20,10 +19,6 @@ $avatarPreset = $user ? avatar_preset_key($user) : 'preset-ocean';
 $headerRoleLabel = $user ? role_label((string)$user['role']) : '';
 if ($user && $userRole === 'SECTION_ADMIN') {
   $divisionName = trim((string)($user['division_name'] ?? ''));
-  if ($divisionName === '' && isset($pdo)) {
-    $freshUser = User::findById($pdo, (int)($user['id'] ?? 0));
-    $divisionName = trim((string)($freshUser['division_name'] ?? ''));
-  }
   if ($divisionName !== '') {
     $headerRoleLabel = $divisionName . ' Section Admin';
   }
@@ -40,10 +35,6 @@ $currentGuideVersion = $user ? ($onboardingVersionMap[strtoupper((string)($user[
 $shouldAutoOpenGuide = $user && (($user['onboarding_guide_version'] ?? '') !== $currentGuideVersion);
 $unreadCount = 0;
 $unreadItems = [];
-if ($user && isset($pdo)) {
-  $unreadCount = Notification::unreadCount($pdo, (int)$user['id']);
-  $unreadItems = Notification::recentAll($pdo, (int)$user['id'], 8);
-}
 $notificationTone = static function (array $n): array {
   $haystack = strtolower(trim(((string)($n['title'] ?? '')) . ' ' . ((string)($n['body'] ?? ''))));
   if ($haystack !== '' && (str_contains($haystack, 'reject') || str_contains($haystack, 'denied') || str_contains($haystack, 'failed') || str_contains($haystack, 'error'))) {
@@ -57,16 +48,7 @@ $notificationTone = static function (array $n): array {
   }
   return ['info', 'bi-bell-fill'];
 };
-$notificationBootstrapItems = array_map(static function (array $row): array {
-  return [
-    'id' => (int)($row['id'] ?? 0),
-    'title' => (string)($row['title'] ?? ''),
-    'body' => (string)($row['body'] ?? ''),
-    'link' => Notification::resolveDestination($row),
-    'is_read' => (int)($row['is_read'] ?? 0) === 1,
-    'created_at' => (string)($row['created_at'] ?? ''),
-  ];
-}, $unreadItems);
+$notificationBootstrapItems = [];
 ?>
 <!doctype html>
 <html lang="en">

@@ -626,7 +626,12 @@ if (!empty($show_admin_status_footer) && is_array($statusCounts)):
       };
 
       pollAlerts();
-      window.setInterval(pollAlerts, 8000);
+      window.setInterval(function () {
+        if (document.visibilityState === 'hidden') {
+          return;
+        }
+        pollAlerts();
+      }, 30000);
 
       const markReadForm = document.getElementById('mark-all-read-form');
       if (markReadForm) {

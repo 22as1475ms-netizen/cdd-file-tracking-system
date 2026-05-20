@@ -2,7 +2,6 @@
 require_once __DIR__ . "/../middleware/require_role.php";
 require_once __DIR__ . "/../models/Document.php";
 require_once __DIR__ . "/../models/Folder.php";
-require_once __DIR__ . "/../models/Notification.php";
 require_once __DIR__ . "/../models/AuditLog.php";
 require_once __DIR__ . "/../models/User.php";
 
@@ -31,18 +30,16 @@ function user_dashboard(): void {
   // and loading the whole inbox on every visit does not scale well.
   [$routedInbox] = Document::listRoutedToUser($pdo, $uid, $userName, $page, $perPage);
   [$activeRoutes] = Document::listRoutedToUser($pdo, $uid, $userName, 1, 6, '', ['ROUTED', 'UNDER_REVIEW']);
-  $recentNotifications = Notification::recentAll($pdo, $uid, 8);
-  $unreadNotifications = Notification::unreadCount($pdo, $uid);
   $recentActivity = AuditLog::recentForUser($pdo, $uid, 8);
 
   view('dashboard/user', [
     'routeSummary' => $routeSummary,
-    'unreadNotifications' => $unreadNotifications,
+    'unreadNotifications' => 0,
     'routedInbox' => $routedInbox,
     'activeRoutes' => $activeRoutes,
     'completedRoutes' => [],
     'recentActivity' => $recentActivity,
-    'recentNotifications' => $recentNotifications,
+    'recentNotifications' => [],
     'routedPagination' => [
       'page' => $page,
       'per_page' => $perPage,
