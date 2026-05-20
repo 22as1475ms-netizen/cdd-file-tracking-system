@@ -152,6 +152,13 @@ function cddfts_session_dir(): string {
     return rtrim($configured, "\\/");
   }
 
+  if (cddfts_is_vercel_runtime()) {
+    $tmpDir = rtrim(sys_get_temp_dir(), "\\/");
+    if ($tmpDir !== '') {
+      return $tmpDir . DIRECTORY_SEPARATOR . 'cddfts_sessions';
+    }
+  }
+
   return rtrim(__DIR__ . '/../../storage/runtime_sessions', "\\/");
 }
 
