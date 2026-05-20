@@ -34,12 +34,14 @@ function cddfts_connect_database(
     PDO::ATTR_EMULATE_PREPARES => false,
   ];
 
-  if ($dbSslCa !== null && $dbSslCa !== '' && defined('PDO::MYSQL_ATTR_SSL_CA')) {
-    $pdoOptions[PDO::MYSQL_ATTR_SSL_CA] = $dbSslCa;
+  $sslCaOption = cddfts_pdo_mysql_option('ATTR_SSL_CA', 'MYSQL_ATTR_SSL_CA');
+  if ($dbSslCa !== null && $dbSslCa !== '' && $sslCaOption !== null) {
+    $pdoOptions[$sslCaOption] = $dbSslCa;
   }
 
-  if (defined('PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT')) {
-    $pdoOptions[PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT] = true;
+  $verifyServerCertOption = cddfts_pdo_mysql_option('ATTR_SSL_VERIFY_SERVER_CERT', 'MYSQL_ATTR_SSL_VERIFY_SERVER_CERT');
+  if ($verifyServerCertOption !== null) {
+    $pdoOptions[$verifyServerCertOption] = true;
   }
 
   $lastException = null;
@@ -115,6 +117,23 @@ function cddfts_resolve_database_ssl_ca_path(): ?string {
   }
 
   return $configured !== '' ? $configured : null;
+}
+
+function cddfts_pdo_mysql_option(string $modernConstant, string $legacyConstant): ?int {
+  $modernClass = 'Pdo\\Mysql';
+  if (class_exists($modernClass)) {
+    $modernName = $modernClass . '::' . $modernConstant;
+    if (defined($modernName)) {
+      return constant($modernName);
+    }
+  }
+
+  $legacyName = 'PDO::' . $legacyConstant;
+  if (defined($legacyName)) {
+    return constant($legacyName);
+  }
+
+  return null;
 }
 
 function cddfts_bootstrap_schema(PDO $pdo): void {
