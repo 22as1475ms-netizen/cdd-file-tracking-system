@@ -5,9 +5,10 @@ $dbName = cddfts_env_string('DB_NAME', 'cdd_file_tracking_system');
 $dbUser = cddfts_env_string('DB_USER', 'root');
 $dbPass = cddfts_env_string('DB_PASS', '');
 $dbCharset = cddfts_env_string('DB_CHARSET', 'utf8mb4');
+$dbSslCa = cddfts_resolve_database_ssl_ca_path();
 const CDDFTS_SCHEMA_VERSION = 5;
 
-$pdo = cddfts_connect_database($dbHost, $dbPort, $dbName, $dbUser, $dbPass, $dbCharset);
+$pdo = cddfts_connect_database($dbHost, $dbPort, $dbName, $dbUser, $dbPass, $dbCharset, $dbSslCa);
 
 if (cddfts_env_bool('DB_AUTO_BOOTSTRAP_SCHEMA', true)) {
   cddfts_bootstrap_schema($pdo);
@@ -19,11 +20,26 @@ function cddfts_connect_database(
   string $dbName,
   string $dbUser,
   string $dbPass,
-  string $dbCharset
+  string $dbCharset,
+  ?string $dbSslCa = null
 ): PDO {
   $hostsToTry = [$dbHost];
   if (!cddfts_env_has('DB_HOST') && cddfts_is_windows_host() && $dbHost === '127.0.0.1') {
     $hostsToTry[] = 'localhost';
+  }
+
+  $pdoOptions = [
+    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+    PDO::ATTR_EMULATE_PREPARES => false,
+  ];
+
+  if ($dbSslCa !== null && $dbSslCa !== '' && defined('PDO::MYSQL_ATTR_SSL_CA')) {
+    $pdoOptions[PDO::MYSQL_ATTR_SSL_CA] = $dbSslCa;
+  }
+
+  if (defined('PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT')) {
+    $pdoOptions[PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT] = true;
   }
 
   $lastException = null;
@@ -33,11 +49,7 @@ function cddfts_connect_database(
         "mysql:host={$host};port={$dbPort};dbname={$dbName};charset={$dbCharset}",
         $dbUser,
         $dbPass,
-        [
-          PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-          PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-          PDO::ATTR_EMULATE_PREPARES => false,
-        ]
+        $pdoOptions
       );
     } catch (PDOException $exception) {
       $lastException = $exception;
@@ -83,6 +95,26 @@ function cddfts_env_has(string $key): bool {
 
 function cddfts_is_windows_host(): bool {
   return DIRECTORY_SEPARATOR === '\\';
+}
+
+function cddfts_resolve_database_ssl_ca_path(): ?string {
+  $configured = cddfts_env_string('DB_SSL_CA', '');
+  if ($configured !== '' && is_file($configured)) {
+    return $configured;
+  }
+
+  foreach ([
+    '/etc/ssl/certs/ca-certificates.crt',
+    '/etc/pki/tls/certs/ca-bundle.crt',
+    '/etc/ssl/cert.pem',
+    '/etc/ssl/ca-bundle.pem',
+  ] as $candidate) {
+    if (is_file($candidate)) {
+      return $candidate;
+    }
+  }
+
+  return $configured !== '' ? $configured : null;
 }
 
 function cddfts_bootstrap_schema(PDO $pdo): void {
