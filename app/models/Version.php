@@ -35,10 +35,18 @@ class Version {
   }
 
   public static function latest(PDO $pdo, int $docId): ?array {
+    static $cache = [];
+    if ($docId <= 0) {
+      return null;
+    }
+    if (array_key_exists($docId, $cache)) {
+      return $cache[$docId];
+    }
+
     $s = $pdo->prepare("SELECT * FROM document_versions WHERE document_id=? ORDER BY version_number DESC LIMIT 1");
     $s->execute([$docId]);
     $r = $s->fetch();
-    return $r ?: null;
+    return $cache[$docId] = ($r ?: null);
   }
 
   public static function countAll(PDO $pdo): int {

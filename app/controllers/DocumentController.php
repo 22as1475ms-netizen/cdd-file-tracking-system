@@ -1382,6 +1382,15 @@ function document_text_preview(string $absPath): ?string {
   return trim((string)$content);
 }
 
+function document_preview_should_defer(array $doc): bool {
+  if (!cddfts_is_vercel_runtime()) {
+    return false;
+  }
+
+  $ext = strtolower((string)pathinfo((string)($doc['name'] ?? ''), PATHINFO_EXTENSION));
+  return in_array($ext, ['txt', 'md', 'csv', 'json', 'xml', 'html', 'css', 'js', 'ts', 'php', 'docx'], true);
+}
+
 function document_preview_payload(array $doc, ?array $latest): array {
   global $pdo;
 
@@ -1424,6 +1433,11 @@ function document_preview_payload(array $doc, ?array $latest): array {
   }
 
   return ['kind' => 'none', 'message' => 'Preview is not supported for this file type. Download the file to open it externally.'];
+}
+
+function document_preview_signed_url(int $docId): string {
+  $token = DocumentService::signedDocumentToken($docId);
+  return BASE_URL . '/documents/preview-data?id=' . $docId . '&sig=' . rawurlencode($token);
 }
 
 function create_document(): void {
@@ -1533,9 +1547,12 @@ function view_doc(): void {
   $reviews = DocumentReview::listForDocument($pdo, $docId);
   $routes = DocumentRoute::listForDocument($pdo, $docId);
   $canViewFile = in_array($level, ['admin', 'owner', 'editor', 'viewer', 'division_chief'], true);
-  $preview = $canViewFile
-    ? document_preview_payload($doc, $latest)
-    : ['kind' => 'none', 'message' => 'File preview is locked until this routed document is accepted.'];
+  $deferPreview = $canViewFile && document_preview_should_defer($doc);
+  $preview = !$canViewFile
+    ? ['kind' => 'none', 'message' => 'File preview is locked until this routed document is accepted.']
+    : ($deferPreview
+      ? ['kind' => 'deferred', 'message' => 'Preview is loading.', 'url' => document_preview_signed_url($docId)]
+      : document_preview_payload($doc, $latest));
 
   view('documents/view', [
     'doc' => $doc,
@@ -1545,10 +1562,52 @@ function view_doc(): void {
     'shareRecipients' => document_route_recipients($pdo, $doc, $uid),
     'latest' => $latest,
     'preview' => $preview,
+    'deferPreview' => $deferPreview,
     'reviews' => $reviews,
     'routes' => $routes,
     'returnUserId' => req_int('user_id', (int)$doc['owner_id']),
   ]);
+}
+
+function document_preview_data(): void {
+  global $pdo;
+
+  $uid = (int)($_SESSION['user']['id'] ?? 0);
+  $docId = req_int('id', 0);
+  $sig = req_str('sig', req_str('token', ''));
+
+  if (!DocumentService::verifyDocumentToken($docId, $sig)) {
+    http_response_code(403);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => false, 'message' => 'Invalid preview token.']);
+    exit;
+  }
+
+  $doc = Document::get($pdo, $docId);
+  if (!$doc) {
+    http_response_code(404);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => false, 'message' => 'Document not found.']);
+    exit;
+  }
+
+  $level = AccessService::level($pdo, $docId, $uid);
+  if (!in_array($level, ['admin', 'owner', 'editor', 'viewer', 'division_chief'], true)) {
+    http_response_code(403);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => false, 'message' => 'Preview is not available for this document.']);
+    exit;
+  }
+
+  $latest = Version::latest($pdo, $docId);
+  $preview = document_preview_payload($doc, $latest);
+
+  header('Content-Type: application/json; charset=utf-8');
+  echo json_encode([
+    'ok' => true,
+    'preview' => $preview,
+  ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+  exit;
 }
 
 function serve_doc_file(): void {

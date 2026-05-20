@@ -87,6 +87,7 @@ function cddfts_web_routes(): array {
     '/documents' => ['middleware' => ['require_login.php'], 'handler' => 'cddfts_documents_redirect'],
     '/documents/upload' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'upload'],
     '/documents/view' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'view_doc'],
+    '/documents/preview-data' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'document_preview_data'],
     '/documents/download' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'download_doc'],
     '/documents/file' => ['controller' => 'DocumentController.php', 'handler' => 'serve_doc_file'],
     '/documents/delete' => ['middleware' => ['require_login.php'], 'controller' => 'DocumentController.php', 'handler' => 'soft_delete'],

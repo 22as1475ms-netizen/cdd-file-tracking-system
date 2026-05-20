@@ -822,6 +822,15 @@ if ($isMaintenanceDoc):
               alt="<?= e((string)$doc['name']) ?>"
             >
           </div>
+        <?php elseif(($preview['kind'] ?? '') === 'deferred'): ?>
+          <div
+            class="document-preview-deferred"
+            data-preview-deferred
+            data-preview-url="<?= e((string)($preview['url'] ?? '')) ?>"
+            data-preview-title="<?= e((string)$editorLabel) ?>"
+          >
+            <div class="drive-note drive-note--soft">Preview is loading. The rest of the page is ready while the file preview loads in the background.</div>
+          </div>
         <?php elseif(($preview['kind'] ?? '') === 'docx-html'): ?>
           <div class="document-preview-text document-preview-docx">
             <?= (string)($preview['html'] ?? '') ?>
@@ -1130,6 +1139,81 @@ if ($isMaintenanceDoc):
         shareCombobox.open();
       }
     });
+  })();
+
+  (function () {
+    const previewRoot = document.querySelector('[data-preview-deferred]');
+    if (!previewRoot) return;
+
+    const previewUrl = previewRoot.getAttribute('data-preview-url') || '';
+    if (!previewUrl) return;
+
+    const escapeHtml = function (value) {
+      return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    };
+
+    const renderPreview = function (preview) {
+      const kind = String(preview && preview.kind ? preview.kind : 'none');
+      if (kind === 'pdf') {
+        return '<iframe class="document-preview-frame" src="' + escapeHtml(preview.url || '') + '" title="PDF preview"></iframe>';
+      }
+      if (kind === 'video') {
+        return ''
+          + '<div class="document-preview-media text-center">'
+          + '  <video class="document-preview-video" src="' + escapeHtml(preview.url || '') + '" controls preload="metadata">'
+          + '    Your browser does not support inline video playback.'
+          + '  </video>'
+          + '</div>';
+      }
+      if (kind === 'image') {
+        return ''
+          + '<div class="document-preview-media text-center">'
+          + '  <img class="document-preview-image" src="' + escapeHtml(preview.url || '') + '" alt="Document preview">'
+          + '</div>';
+      }
+      if (kind === 'docx-html') {
+        return ''
+          + '<div class="document-preview-text document-preview-docx">' + String(preview.html || '') + '</div>'
+          + '<div class="text-muted small mt-2">DOCX preview is shown as a lightweight browser rendering of the document, including embedded images when available.</div>';
+      }
+      if (kind === 'text' || kind === 'docx-text') {
+        return ''
+          + '<div class="document-preview-text"><pre>' + escapeHtml(preview.text || '') + '</pre></div>'
+          + (kind === 'docx-text' ? '<div class="text-muted small mt-2">DOCX preview is shown as extracted text for reading before download.</div>' : '');
+      }
+      return '<div class="drive-note drive-note--soft">' + escapeHtml(preview && preview.message ? preview.message : 'Preview unavailable.') + '</div>';
+    };
+
+    const setMessage = function (message) {
+      previewRoot.innerHTML = '<div class="drive-note drive-note--soft">' + escapeHtml(message) + '</div>';
+    };
+
+    fetch(previewUrl, {
+      method: 'GET',
+      headers: { 'Accept': 'application/json' },
+      credentials: 'same-origin',
+      cache: 'no-store'
+    })
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error('Preview request failed.');
+        }
+        return response.json();
+      })
+      .then(function (payload) {
+        if (!payload || payload.ok !== true) {
+          throw new Error(payload && payload.message ? payload.message : 'Preview unavailable.');
+        }
+        previewRoot.innerHTML = renderPreview(payload.preview || {});
+      })
+      .catch(function () {
+        setMessage('Preview could not be loaded right now. You can still download the file.');
+      });
   })();
 </script>
 

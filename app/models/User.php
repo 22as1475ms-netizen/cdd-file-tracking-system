@@ -62,6 +62,14 @@ class User {
   }
 
   public static function findById(PDO $pdo, int $id): ?array {
+    static $cache = [];
+    if ($id <= 0) {
+      return null;
+    }
+    if (array_key_exists($id, $cache)) {
+      return $cache[$id];
+    }
+
     $s = $pdo->prepare("
       SELECT u.*, d.name AS division_name
       FROM users u
@@ -70,7 +78,7 @@ class User {
     ");
     $s->execute([$id]);
     $u = $s->fetch();
-    return $u ?: null;
+    return $cache[$id] = ($u ?: null);
   }
 
   public static function all(PDO $pdo): array {

@@ -6,9 +6,10 @@ $dbUser = cddfts_env_string('DB_USER', 'root');
 $dbPass = cddfts_env_string('DB_PASS', '');
 $dbCharset = cddfts_env_string('DB_CHARSET', 'utf8mb4');
 $dbSslCa = cddfts_resolve_database_ssl_ca_path();
+$dbPersistent = cddfts_env_bool('DB_PERSISTENT', cddfts_is_vercel_runtime());
 const CDDFTS_SCHEMA_VERSION = 5;
 
-$pdo = cddfts_connect_database($dbHost, $dbPort, $dbName, $dbUser, $dbPass, $dbCharset, $dbSslCa);
+$pdo = cddfts_connect_database($dbHost, $dbPort, $dbName, $dbUser, $dbPass, $dbCharset, $dbSslCa, $dbPersistent);
 
 if (cddfts_env_bool('DB_AUTO_BOOTSTRAP_SCHEMA', true)) {
   cddfts_bootstrap_schema($pdo);
@@ -21,7 +22,8 @@ function cddfts_connect_database(
   string $dbUser,
   string $dbPass,
   string $dbCharset,
-  ?string $dbSslCa = null
+  ?string $dbSslCa = null,
+  bool $persistent = false
 ): PDO {
   $hostsToTry = [$dbHost];
   if (!cddfts_env_has('DB_HOST') && cddfts_is_windows_host() && $dbHost === '127.0.0.1') {
@@ -33,6 +35,10 @@ function cddfts_connect_database(
     PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
     PDO::ATTR_EMULATE_PREPARES => false,
   ];
+
+  if ($persistent) {
+    $pdoOptions[PDO::ATTR_PERSISTENT] = true;
+  }
 
   $sslCaOption = cddfts_pdo_mysql_option('ATTR_SSL_CA', 'MYSQL_ATTR_SSL_CA');
   if ($dbSslCa !== null && $dbSslCa !== '' && $sslCaOption !== null) {

@@ -29,7 +29,7 @@ function user_dashboard(): void {
   // Keep the dashboard list paged. Staff can accumulate a long route history,
   // and loading the whole inbox on every visit does not scale well.
   [$routedInbox] = Document::listRoutedToUser($pdo, $uid, $userName, $page, $perPage);
-  [$activeRoutes] = Document::listRoutedToUser($pdo, $uid, $userName, 1, 6, '', ['ROUTED', 'UNDER_REVIEW']);
+  [$activeRoutes] = Document::listRoutedToUser($pdo, $uid, $userName, 1, 6, '', ['ROUTED', 'UNDER_REVIEW'], false);
   $recentActivity = AuditLog::recentForUser($pdo, $uid, 8);
 
   view('dashboard/user', [

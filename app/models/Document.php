@@ -186,6 +186,14 @@ class Document {
   }
 
   public static function get(PDO $pdo, int $id): ?array {
+    static $cache = [];
+    if ($id <= 0) {
+      return null;
+    }
+    if (array_key_exists($id, $cache)) {
+      return $cache[$id];
+    }
+
     $s = $pdo->prepare("
       SELECT d.*, u.name owner_name, u.email owner_email, u.division_id owner_division_id, dv.name division_name,
              reviewer.name assigned_reviewer_name, reviewer.email assigned_reviewer_email,
@@ -199,7 +207,7 @@ class Document {
     ");
     $s->execute([$id]);
     $r = $s->fetch();
-    return $r ?: null;
+    return $cache[$id] = ($r ?: null);
   }
 
   public static function findActiveByOwnerAndNameInFolder(PDO $pdo, int $ownerId, string $name, ?int $folderId, ?string $storageArea = null): ?array {
@@ -266,7 +274,8 @@ class Document {
     int $page = 1,
     int $perPage = 25,
     string $search = '',
-    array $routeStates = []
+    array $routeStates = [],
+    bool $includeTotal = true
   ): array {
     // Central routed-inbox query for both staff and admin views.
     // Keep this paged and join-based: the older per-row subquery pattern becomes
@@ -346,20 +355,23 @@ class Document {
     $stmt->execute($params);
     $rows = $stmt->fetchAll();
 
-    $countParams = [$userId];
-    $countParams = array_merge($countParams, self::routedScopeParams($userId, $userName));
-    $countSearchSql = self::buildSearchSql($search, $countParams);
-    $countRouteStateSql = self::buildRoutedStateFilterSql($routeStates, $countParams);
-    $countStmt = $pdo->prepare("
-      SELECT COUNT(*)
-      FROM documents d
-      LEFT JOIN permissions p_user ON p_user.document_id = d.id AND p_user.user_id = ?
-      WHERE " . self::routedScopeWhereSql() . "
-      {$countSearchSql}
-      {$countRouteStateSql}
-    ");
-    $countStmt->execute($countParams);
-    $total = (int)$countStmt->fetchColumn();
+    $total = count($rows);
+    if ($includeTotal) {
+      $countParams = [$userId];
+      $countParams = array_merge($countParams, self::routedScopeParams($userId, $userName));
+      $countSearchSql = self::buildSearchSql($search, $countParams);
+      $countRouteStateSql = self::buildRoutedStateFilterSql($routeStates, $countParams);
+      $countStmt = $pdo->prepare("
+        SELECT COUNT(*)
+        FROM documents d
+        LEFT JOIN permissions p_user ON p_user.document_id = d.id AND p_user.user_id = ?
+        WHERE " . self::routedScopeWhereSql() . "
+        {$countSearchSql}
+        {$countRouteStateSql}
+      ");
+      $countStmt->execute($countParams);
+      $total = (int)$countStmt->fetchColumn();
+    }
 
     return [$rows, $total];
   }
